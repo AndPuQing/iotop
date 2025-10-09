@@ -67,22 +67,31 @@ impl ProcessInfo {
         }
     }
 
+    // Helper function to read and parse /proc/[pid]/status once
+    fn read_proc_status(pid: i32) -> HashMap<String, String> {
+        let mut result = HashMap::new();
+        if let Ok(content) = fs::read_to_string(format!("/proc/{}/status", pid)) {
+            for line in content.lines() {
+                if let Some((key, value)) = line.split_once(':') {
+                    result.insert(key.trim().to_string(), value.trim().to_string());
+                }
+            }
+        }
+        result
+    }
+
     pub fn get_uid(&mut self) -> Option<u32> {
         if self.uid.is_none() || self.uid == Some(0) {
             // Check current UID
-            let status_path = format!("/proc/{}/status", self.pid);
-            if let Ok(content) = fs::read_to_string(&status_path) {
-                for line in content.lines() {
-                    if line.starts_with("Uid:") {
-                        if let Some(uid_str) = line.split_whitespace().nth(1) {
-                            if let Ok(uid) = uid_str.parse::<u32>() {
-                                if uid != self.uid.unwrap_or(u32::MAX) {
-                                    self.user = None;
-                                    self.uid = Some(uid);
-                                }
-                                return Some(uid);
-                            }
+            let status = Self::read_proc_status(self.pid);
+            if let Some(uid_line) = status.get("Uid") {
+                if let Some(uid_str) = uid_line.split_whitespace().next() {
+                    if let Ok(uid) = uid_str.parse::<u32>() {
+                        if uid != self.uid.unwrap_or(u32::MAX) {
+                            self.user = None;
+                            self.uid = Some(uid);
                         }
+                        return Some(uid);
                     }
                 }
             }
@@ -167,16 +176,10 @@ impl ProcessInfo {
 
     pub fn get_tgid(&self) -> i32 {
         // Read TGID (parent process ID) from /proc/[tid]/status
-        let status_path = format!("/proc/{}/status", self.tid);
-        if let Ok(content) = fs::read_to_string(&status_path) {
-            for line in content.lines() {
-                if line.starts_with("Tgid:") {
-                    if let Some(tgid_str) = line.split_whitespace().nth(1) {
-                        if let Ok(tgid) = tgid_str.parse::<i32>() {
-                            return tgid;
-                        }
-                    }
-                }
+        let status = Self::read_proc_status(self.tid);
+        if let Some(tgid_str) = status.get("Tgid") {
+            if let Some(tgid) = tgid_str.split_whitespace().next().and_then(|s| s.parse::<i32>().ok()) {
+                return tgid;
             }
         }
         self.tid // Fallback to tid if we can't find TGID
@@ -193,13 +196,21 @@ impl ProcessInfo {
     }
 
     pub fn update_cmdline(&mut self) {
+        // Only update cmdline if not cached (first time)
+        // Note: Processes may exec(), but updating every cycle is expensive
+        // We trade accuracy for performance here (like raw-iotop does via caching in UI)
         if self.cmdline.is_none() {
             self.cmdline = Some(self.compute_cmdline());
         }
     }
 
-    fn compute_cmdline(&self) -> String {
+    // Force refresh cmdline (for when process might have exec'd)
+    #[allow(dead_code)]
+    pub fn refresh_cmdline(&mut self) {
+        self.cmdline = Some(self.compute_cmdline());
+    }
 
+    fn compute_cmdline(&self) -> String {
         // Read cmdline from the main process (TGID), not the thread
         let cmdline_path = format!("/proc/{}/cmdline", self.pid);
         let result = if let Ok(cmdline) = fs::read_to_string(&cmdline_path) {
@@ -224,31 +235,12 @@ impl ProcessInfo {
                     let tgid = self.get_tgid();
                     if tgid != self.tid {
                         // This is a thread, not the main process
-                        // Get the main process name
-                        let tgid_name = if let Ok(status) =
-                            fs::read_to_string(format!("/proc/{}/status", tgid))
-                        {
-                            status
-                                .lines()
-                                .find(|line| line.starts_with("Name:"))
-                                .and_then(|line| line.split(':').nth(1))
-                                .map(|name| name.trim().to_string())
-                        } else {
-                            None
-                        };
+                        // Read both status files in one go
+                        let tgid_status = Self::read_proc_status(tgid);
+                        let thread_status = Self::read_proc_status(self.tid);
 
-                        // Get the thread name
-                        let thread_name = if let Ok(status) =
-                            fs::read_to_string(format!("/proc/{}/status", self.tid))
-                        {
-                            status
-                                .lines()
-                                .find(|line| line.starts_with("Name:"))
-                                .and_then(|line| line.split(':').nth(1))
-                                .map(|name| name.trim().to_string())
-                        } else {
-                            None
-                        };
+                        let tgid_name = tgid_status.get("Name").map(|s| s.to_string());
+                        let thread_name = thread_status.get("Name").map(|s| s.to_string());
 
                         // Add thread name suffix if it's different from the main process name
                         if let (Some(tname), Some(pname)) = (thread_name, tgid_name) {
@@ -264,32 +256,18 @@ impl ProcessInfo {
                 }
             } else {
                 // Kernel thread - get name from status (use tid for kernel threads)
-                if let Ok(status) = fs::read_to_string(format!("/proc/{}/status", self.tid)) {
-                    if let Some(line) = status.lines().find(|line| line.starts_with("Name:")) {
-                        if let Some(name) = line.split(':').nth(1) {
-                            format!("[{}]", name.trim())
-                        } else {
-                            "{no such process}".to_string()
-                        }
-                    } else {
-                        "{no such process}".to_string()
-                    }
+                let status = Self::read_proc_status(self.tid);
+                if let Some(name) = status.get("Name") {
+                    format!("[{}]", name)
                 } else {
                     "{no such process}".to_string()
                 }
             }
         } else {
             // Kernel thread - get name from status (use tid for kernel threads)
-            if let Ok(status) = fs::read_to_string(format!("/proc/{}/status", self.tid)) {
-                if let Some(line) = status.lines().find(|line| line.starts_with("Name:")) {
-                    if let Some(name) = line.split(':').nth(1) {
-                        format!("[{}]", name.trim())
-                    } else {
-                        "{no such process}".to_string()
-                    }
-                } else {
-                    "{no such process}".to_string()
-                }
+            let status = Self::read_proc_status(self.tid);
+            if let Some(name) = status.get("Name") {
+                format!("[{}]", name)
             } else {
                 "{no such process}".to_string()
             }
@@ -453,35 +431,6 @@ impl ProcessList {
         Ok((pgpgin * 4096, pgpgout * 4096))
     }
 
-    pub fn list_pids(&self, show_processes: bool) -> Result<Vec<i32>> {
-        let entries = fs::read_dir("/proc")?;
-        let mut pids = Vec::new();
-
-        for entry in entries.flatten() {
-            if let Ok(file_name) = entry.file_name().into_string() {
-                if let Ok(pid) = file_name.parse::<i32>() {
-                    if show_processes {
-                        pids.push(pid);
-                    } else {
-                        // List all threads
-                        let task_dir = format!("/proc/{}/task", pid);
-                        if let Ok(task_entries) = fs::read_dir(task_dir) {
-                            for task_entry in task_entries.flatten() {
-                                if let Ok(tid_str) = task_entry.file_name().into_string() {
-                                    if let Ok(tid) = tid_str.parse::<i32>() {
-                                        pids.push(tid);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(pids)
-    }
-
     pub fn refresh_processes(&mut self, show_processes: bool) -> Result<((u64, u64), (u64, u64))> {
         let new_timestamp = Instant::now();
         self.duration = new_timestamp.duration_since(self.timestamp).as_secs_f64();
@@ -512,37 +461,44 @@ impl ProcessList {
             }
         }
 
-        let pids = self.list_pids(show_processes)?;
+        // Two-stage process listing (like raw-iotop):
+        // 1. List all TGIDs (main process IDs) from /proc
+        // 2. For each TGID, list threads from /proc/{tgid}/task (only once!)
+        let entries = fs::read_dir("/proc")?;
 
-        for pid in pids {
-            let process = self
-                .processes
-                .entry(pid)
-                .or_insert_with(|| ProcessInfo::new(pid));
+        for entry in entries.flatten() {
+            if let Ok(file_name) = entry.file_name().into_string() {
+                if let Ok(tgid) = file_name.parse::<i32>() {
+                    // Get the ProcessInfo for this TGID
+                    let process = self
+                        .processes
+                        .entry(tgid)
+                        .or_insert_with(|| ProcessInfo::new(tgid));
 
-            // Set tid to pid for threads
-            process.tid = pid;
+                    // Set tid to tgid for main thread
+                    process.tid = tgid;
 
-            // Get thread IDs for this process
-            let tids = if show_processes {
-                let task_dir = format!("/proc/{}/task", pid);
-                fs::read_dir(task_dir)
-                    .ok()
-                    .map(|entries| {
-                        entries
-                            .flatten()
-                            .filter_map(|e| {
-                                e.file_name()
-                                    .into_string()
-                                    .ok()
-                                    .and_then(|s| s.parse::<i32>().ok())
+                    // Get thread IDs for this process (read /proc/{tgid}/task ONCE)
+                    let tids = if show_processes {
+                        let task_dir = format!("/proc/{}/task", tgid);
+                        fs::read_dir(task_dir)
+                            .ok()
+                            .map(|entries| {
+                                entries
+                                    .flatten()
+                                    .filter_map(|e| {
+                                        e.file_name()
+                                            .into_string()
+                                            .ok()
+                                            .and_then(|s| s.parse::<i32>().ok())
+                                    })
+                                    .collect::<Vec<_>>()
                             })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_else(|| vec![pid])
-            } else {
-                vec![pid]
-            };
+                            .unwrap_or_else(|| vec![tgid])
+                    } else {
+                        // Thread mode: only show the main thread
+                        vec![tgid]
+                    };
 
             for tid in tids {
                 let thread = process
@@ -560,16 +516,36 @@ impl ProcessList {
                 }
             }
 
-            process.update_stats();
-            process.get_uid();
+                    process.update_stats();
 
-            // Cache metadata to avoid repeated reads during rendering
-            process.update_cmdline();
-            process.update_user();
-            process.update_prio();
+                    // Read /proc/{}/status ONCE and extract all needed fields
+                    let status = ProcessInfo::read_proc_status(tgid);
 
-            // Update PID to be the TGID (parent process ID)
-            process.pid = process.get_tgid();
+                    // Extract and cache UID
+                    if let Some(uid_line) = status.get("Uid") {
+                        if let Some(uid_str) = uid_line.split_whitespace().next() {
+                            if let Ok(uid) = uid_str.parse::<u32>() {
+                                if uid != process.uid.unwrap_or(u32::MAX) {
+                                    process.user = None;
+                                }
+                                process.uid = Some(uid);
+                            }
+                        }
+                    }
+
+                    // Extract and cache TGID
+                    if let Some(tgid_str) = status.get("Tgid") {
+                        if let Some(tgid_val) = tgid_str.split_whitespace().next().and_then(|s| s.parse::<i32>().ok()) {
+                            process.pid = tgid_val;
+                        }
+                    }
+
+                    // Cache other metadata to avoid repeated reads during rendering
+                    process.update_cmdline();
+                    process.update_user();
+                    process.update_prio();
+                }
+            }
         }
 
         // Remove processes that no longer exist

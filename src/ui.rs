@@ -8,10 +8,10 @@ use crossterm::{
 use futures::{FutureExt, StreamExt};
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    text::{Line, Span, Text},
+    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
@@ -65,31 +65,62 @@ pub enum SortColumn {
 }
 
 impl SortColumn {
-    // Cycle right: TID → PRIO → USER → READ → WRITE → SWAPIN → IO → COMMAND → TID
-    pub fn cycle_forward(&self) -> Self {
-        match self {
-            SortColumn::Pid => SortColumn::Prio,
-            SortColumn::Prio => SortColumn::User,
-            SortColumn::User => SortColumn::Read,
-            SortColumn::Read => SortColumn::Write,
-            SortColumn::Write => SortColumn::Swapin,
-            SortColumn::Swapin => SortColumn::Io,
-            SortColumn::Io => SortColumn::Command,
-            SortColumn::Command => SortColumn::Pid,
+    /// Get all available columns based on whether delay accounting is available
+    fn available_columns(has_delay_acct: bool) -> Vec<SortColumn> {
+        if has_delay_acct {
+            vec![
+                SortColumn::Pid,
+                SortColumn::Prio,
+                SortColumn::User,
+                SortColumn::Read,
+                SortColumn::Write,
+                SortColumn::Swapin,
+                SortColumn::Io,
+                SortColumn::Command,
+            ]
+        } else {
+            vec![
+                SortColumn::Pid,
+                SortColumn::Prio,
+                SortColumn::User,
+                SortColumn::Read,
+                SortColumn::Write,
+                SortColumn::Command,
+            ]
         }
     }
 
-    // Cycle left: TID ← PRIO ← USER ← READ ← WRITE ← SWAPIN ← IO ← COMMAND ← TID
-    pub fn cycle_backward(&self) -> Self {
-        match self {
-            SortColumn::Pid => SortColumn::Command,
-            SortColumn::Prio => SortColumn::Pid,
-            SortColumn::User => SortColumn::Prio,
-            SortColumn::Read => SortColumn::User,
-            SortColumn::Write => SortColumn::Read,
-            SortColumn::Swapin => SortColumn::Write,
-            SortColumn::Io => SortColumn::Swapin,
-            SortColumn::Command => SortColumn::Io,
+    /// Cycle to the next column (right arrow)
+    pub fn cycle_forward(&self, has_delay_acct: bool) -> Self {
+        let columns = Self::available_columns(has_delay_acct);
+        let current_idx = columns.iter().position(|c| c == self);
+
+        match current_idx {
+            Some(idx) => {
+                let next_idx = (idx + 1) % columns.len();
+                columns[next_idx]
+            }
+            None => {
+                // Current column not in available list, return first available
+                columns[0]
+            }
+        }
+    }
+
+    /// Cycle to the previous column (left arrow)
+    pub fn cycle_backward(&self, has_delay_acct: bool) -> Self {
+        let columns = Self::available_columns(has_delay_acct);
+        let current_idx = columns.iter().position(|c| c == self);
+
+        match current_idx {
+            Some(idx) => {
+                let prev_idx = if idx == 0 { columns.len() - 1 } else { idx - 1 };
+                columns[prev_idx]
+            }
+            None => {
+                // Current column not in available list, return first available
+                columns[0]
+            }
         }
     }
 }
@@ -127,7 +158,6 @@ impl Tui {
             tick_rate: 1.0, // 1 Hz for iotop data updates
         })
     }
-
 
     pub fn start(&mut self) {
         self.cancel(); // Cancel any existing task
@@ -353,6 +383,7 @@ fn render_header(
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Rgb(100, 100, 100))) // Gray borders
         .title(" iotop - I/O Monitor ");
 
@@ -376,79 +407,121 @@ fn render_process_table(
 
     let header_cells = if has_delay_acct {
         vec![
-            Cell::from(if state.sort_column == SortColumn::Pid {
-                format!("TID {}", sort_indicator)
-            } else {
-                "TID".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::Prio {
-                format!("PRIO {}", sort_indicator)
-            } else {
-                "PRIO".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::User {
-                format!("USER {}", sort_indicator)
-            } else {
-                "USER".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::Read {
-                format!("DISK READ {}", sort_indicator)
-            } else {
-                "DISK READ".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::Write {
-                format!("DISK WRITE {}", sort_indicator)
-            } else {
-                "DISK WRITE".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::Swapin {
-                format!("SWAPIN {}", sort_indicator)
-            } else {
-                "SWAPIN".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::Io {
-                format!("IO {}", sort_indicator)
-            } else {
-                "IO".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::Command {
-                format!("COMMAND {}", sort_indicator)
-            } else {
-                "COMMAND".to_string()
-            }),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Pid {
+                    format!("TID {}", sort_indicator)
+                } else {
+                    "TID".to_string()
+                })
+                .alignment(Alignment::Right),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Prio {
+                    format!("PRIO {}", sort_indicator)
+                } else {
+                    "PRIO".to_string()
+                })
+                .alignment(Alignment::Right),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::User {
+                    format!("USER {}", sort_indicator)
+                } else {
+                    "USER".to_string()
+                })
+                .alignment(Alignment::Left),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Read {
+                    format!("DISK READ {}", sort_indicator)
+                } else {
+                    "DISK READ".to_string()
+                })
+                .alignment(Alignment::Right),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Write {
+                    format!("DISK WRITE {}", sort_indicator)
+                } else {
+                    "DISK WRITE".to_string()
+                })
+                .alignment(Alignment::Right),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Swapin {
+                    format!("SWAPIN {}", sort_indicator)
+                } else {
+                    "SWAPIN".to_string()
+                })
+                .alignment(Alignment::Right),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Io {
+                    format!("IO {}", sort_indicator)
+                } else {
+                    "IO".to_string()
+                })
+                .alignment(Alignment::Right),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Command {
+                    format!("COMMAND {}", sort_indicator)
+                } else {
+                    "COMMAND".to_string()
+                })
+                .alignment(Alignment::Left),
+            ),
         ]
     } else {
         vec![
-            Cell::from(if state.sort_column == SortColumn::Pid {
-                format!("TID {}", sort_indicator)
-            } else {
-                "TID".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::Prio {
-                format!("PRIO {}", sort_indicator)
-            } else {
-                "PRIO".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::User {
-                format!("USER {}", sort_indicator)
-            } else {
-                "USER".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::Read {
-                format!("DISK READ {}", sort_indicator)
-            } else {
-                "DISK READ".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::Write {
-                format!("DISK WRITE {}", sort_indicator)
-            } else {
-                "DISK WRITE".to_string()
-            }),
-            Cell::from(if state.sort_column == SortColumn::Command {
-                format!("COMMAND {}", sort_indicator)
-            } else {
-                "COMMAND".to_string()
-            }),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Pid {
+                    format!("TID {}", sort_indicator)
+                } else {
+                    "TID".to_string()
+                })
+                .alignment(Alignment::Right),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Prio {
+                    format!("PRIO {}", sort_indicator)
+                } else {
+                    "PRIO".to_string()
+                })
+                .alignment(Alignment::Right),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::User {
+                    format!("USER {}", sort_indicator)
+                } else {
+                    "USER".to_string()
+                })
+                .alignment(Alignment::Left),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Read {
+                    format!("DISK READ {}", sort_indicator)
+                } else {
+                    "DISK READ".to_string()
+                })
+                .alignment(Alignment::Right),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Write {
+                    format!("DISK WRITE {}", sort_indicator)
+                } else {
+                    "DISK WRITE".to_string()
+                })
+                .alignment(Alignment::Right),
+            ),
+            Cell::from(
+                Text::from(if state.sort_column == SortColumn::Command {
+                    format!("COMMAND {}", sort_indicator)
+                } else {
+                    "COMMAND".to_string()
+                })
+                .alignment(Alignment::Left),
+            ),
         ]
     };
 
@@ -489,29 +562,29 @@ fn render_process_table(
             let swapin_delay = format_delay_percent(stats.swapin_delay_total, duration);
 
             Row::new(vec![
-                Cell::from(format!("{:>7}", process.tid)),
-                Cell::from(format!("{:>4}", process.get_prio())),
-                Cell::from(format!("{:<8}", process.get_user())),
-                Cell::from(format!("{:>11}", read_str))
+                Cell::from(Text::from(process.tid.to_string()).alignment(Alignment::Right)),
+                Cell::from(Text::from(process.get_prio().to_string()).alignment(Alignment::Right)),
+                Cell::from(Text::from(process.get_user()).alignment(Alignment::Left)),
+                Cell::from(Text::from(read_str).alignment(Alignment::Right))
                     .style(Style::default().fg(Color::Rgb(100, 180, 255))), // Soft blue
-                Cell::from(format!("{:>11}", write_str))
+                Cell::from(Text::from(write_str).alignment(Alignment::Right))
                     .style(Style::default().fg(Color::Rgb(255, 140, 140))), // Soft red/pink
-                Cell::from(format!("{:>6}", swapin_delay)),
-                Cell::from(format!("{:>2}", io_delay))
+                Cell::from(Text::from(swapin_delay).alignment(Alignment::Right)),
+                Cell::from(Text::from(io_delay).alignment(Alignment::Right))
                     .style(Style::default().fg(Color::Rgb(180, 140, 255))), // Soft purple
-                Cell::from(process.get_cmdline()),
+                Cell::from(Text::from(process.get_cmdline()).alignment(Alignment::Left)),
             ])
             .style(row_style)
         } else {
             Row::new(vec![
-                Cell::from(format!("{:>7}", process.tid)),
-                Cell::from(format!("{:>4}", process.get_prio())),
-                Cell::from(format!("{:<8}", process.get_user())),
-                Cell::from(format!("{:>11}", read_str))
+                Cell::from(Text::from(process.tid.to_string()).alignment(Alignment::Right)),
+                Cell::from(Text::from(process.get_prio().to_string()).alignment(Alignment::Right)),
+                Cell::from(Text::from(process.get_user()).alignment(Alignment::Left)),
+                Cell::from(Text::from(read_str).alignment(Alignment::Right))
                     .style(Style::default().fg(Color::Rgb(100, 180, 255))), // Soft blue
-                Cell::from(format!("{:>11}", write_str))
+                Cell::from(Text::from(write_str).alignment(Alignment::Right))
                     .style(Style::default().fg(Color::Rgb(255, 140, 140))), // Soft red/pink
-                Cell::from(process.get_cmdline()),
+                Cell::from(Text::from(process.get_cmdline()).alignment(Alignment::Left)),
             ])
             .style(row_style)
         }
@@ -520,30 +593,35 @@ fn render_process_table(
     let widths = if has_delay_acct {
         vec![
             Constraint::Length(8),  // TID
-            Constraint::Length(5),  // PRIO
+            Constraint::Length(7),  // PRIO (needs space for "PRIO ▼")
             Constraint::Length(9),  // USER
-            Constraint::Length(12), // DISK READ
-            Constraint::Length(12), // DISK WRITE
-            Constraint::Length(7),  // SWAPIN
-            Constraint::Length(3),  // IO
+            Constraint::Length(14), // DISK READ (needs space for "DISK READ ▼")
+            Constraint::Length(14), // DISK WRITE (needs space for "DISK WRITE ▼")
+            Constraint::Length(9),  // SWAPIN (needs space for "SWAPIN ▼")
+            Constraint::Length(5),  // IO (needs space for "IO ▼")
             Constraint::Min(20),    // COMMAND
         ]
     } else {
         vec![
             Constraint::Length(8),  // TID
-            Constraint::Length(5),  // PRIO
+            Constraint::Length(7),  // PRIO (needs space for "PRIO ▼")
             Constraint::Length(9),  // USER
-            Constraint::Length(12), // DISK READ
-            Constraint::Length(12), // DISK WRITE
+            Constraint::Length(14), // DISK READ (needs space for "DISK READ ▼")
+            Constraint::Length(14), // DISK WRITE (needs space for "DISK WRITE ▼")
             Constraint::Min(20),    // COMMAND
         ]
     };
 
-    let table = Table::new(rows, widths).header(header).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(100, 100, 100))), // Gray borders
-    );
+    let table = Table::default()
+        .rows(rows)
+        .header(header)
+        .widths(widths)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Rgb(100, 100, 100))), // Gray borders
+        );
 
     f.render_widget(table, area);
 }
@@ -556,10 +634,10 @@ fn render_footer(f: &mut Frame, area: Rect, state: &UIState) {
         Span::raw(":only-active  "),
         Span::styled("a", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
         Span::raw(":accumulated  "),
-        Span::styled("r", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
-        Span::raw(":reverse  "),
         Span::styled("←→", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
         Span::raw(":sort  "),
+        Span::styled("↑↓", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
+        Span::raw(":reverse  "),
         Span::styled(
             "space",
             Style::default().fg(Color::Rgb(100, 180, 255)).bold(),
@@ -598,6 +676,7 @@ fn render_footer(f: &mut Frame, area: Rect, state: &UIState) {
     let paragraph = Paragraph::new(text).block(
         Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Rgb(100, 100, 100))) // Gray borders
             .title(" Controls "),
     );

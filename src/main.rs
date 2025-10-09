@@ -190,10 +190,13 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                             state.paused = !state.paused;
                         }
                         KeyCode::Left => {
-                            state.sort_column = state.sort_column.cycle_backward();
+                            state.sort_column = state.sort_column.cycle_backward(has_delay_acct);
                         }
                         KeyCode::Right => {
-                            state.sort_column = state.sort_column.cycle_forward();
+                            state.sort_column = state.sort_column.cycle_forward(has_delay_acct);
+                        }
+                        KeyCode::Up | KeyCode::Down => {
+                            state.sort_reverse = !state.sort_reverse;
                         }
                         _ => {}
                     },
