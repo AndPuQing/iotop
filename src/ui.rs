@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
+    widgets::{block::Title, Block, BorderType, Borders, Cell, Paragraph, Row, Table},
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
@@ -62,6 +62,21 @@ pub enum SortColumn {
     Swapin,
     Io,
     Command,
+}
+
+impl SortColumn {
+    fn as_str(&self) -> &str {
+        match self {
+            SortColumn::Pid => "tid",
+            SortColumn::Prio => "prio",
+            SortColumn::User => "user",
+            SortColumn::Read => "read",
+            SortColumn::Write => "write",
+            SortColumn::Swapin => "swapin",
+            SortColumn::Io => "io",
+            SortColumn::Command => "command",
+        }
+    }
 }
 
 impl SortColumn {
@@ -138,7 +153,7 @@ impl Default for UIState {
         Self {
             only_active: false,
             accumulated: false,
-            sort_column: SortColumn::Io,
+            sort_column: SortColumn::Pid,
             sort_reverse: true,
             paused: false,
         }
@@ -308,24 +323,17 @@ fn render_ui(
 ) {
     let size = f.area();
 
-    // Create main layout: header + content + footer
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4), // Header with I/O stats
             Constraint::Min(5),    // Process table
-            Constraint::Length(3), // Footer with help
         ])
         .split(size);
 
-    // Render header
     render_header(f, chunks[0], total_io, actual_io, duration);
 
-    // Render process table
     render_process_table(f, chunks[1], processes, duration, state, has_delay_acct);
-
-    // Render footer
-    render_footer(f, chunks[2], state);
 }
 
 fn render_header(
@@ -342,41 +350,29 @@ fn render_header(
 
     let text = vec![
         Line::from(vec![
-            Span::styled(
-                "Total DISK READ: ",
-                Style::default().fg(Color::Rgb(180, 180, 180)),
-            ),
+            Span::styled("Total DISK READ: ", Style::default().fg(Color::White)),
             Span::styled(
                 format!("{:>12}", total_read_str),
-                Style::default().fg(Color::Rgb(100, 180, 255)), // Soft blue
+                Style::default().fg(Color::White), // Soft blue
             ),
             Span::raw("  │  "),
-            Span::styled(
-                "Total DISK WRITE: ",
-                Style::default().fg(Color::Rgb(180, 180, 180)),
-            ),
+            Span::styled("Total DISK WRITE: ", Style::default().fg(Color::White)),
             Span::styled(
                 format!("{:>12}", total_write_str),
-                Style::default().fg(Color::Rgb(255, 140, 140)), // Soft red/pink
+                Style::default().fg(Color::White), // Soft red/pink
             ),
         ]),
         Line::from(vec![
-            Span::styled(
-                "Actual DISK READ: ",
-                Style::default().fg(Color::Rgb(140, 140, 140)),
-            ),
+            Span::styled("Actual DISK READ: ", Style::default().fg(Color::White)),
             Span::styled(
                 format!("{:>11}", actual_read_str),
-                Style::default().fg(Color::Rgb(100, 180, 255)), // Soft blue
+                Style::default().fg(Color::White), // Soft blue
             ),
             Span::raw("  │  "),
-            Span::styled(
-                "Actual DISK WRITE: ",
-                Style::default().fg(Color::Rgb(140, 140, 140)),
-            ),
+            Span::styled("Actual DISK WRITE: ", Style::default().fg(Color::White)),
             Span::styled(
                 format!("{:>11}", actual_write_str),
-                Style::default().fg(Color::Rgb(255, 140, 140)), // Soft red/pink
+                Style::default().fg(Color::White), // Soft red/pink
             ),
         ]),
     ];
@@ -384,7 +380,8 @@ fn render_header(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(100, 100, 100))) // Gray borders
+        .border_style(Style::default().fg(Color::Gray)) // Gray borders
+        .bg(Color::Black) // Dark background
         .title(" iotop - I/O Monitor ");
 
     let paragraph = Paragraph::new(text).block(block);
@@ -400,128 +397,28 @@ fn render_process_table(
     has_delay_acct: bool,
 ) {
     let header_style = Style::default()
-        .fg(Color::Rgb(200, 200, 200)) // Light gray
+        .fg(Color::White)
         .add_modifier(Modifier::BOLD);
-
-    let sort_indicator = if state.sort_reverse { "▼" } else { "▲" };
 
     let header_cells = if has_delay_acct {
         vec![
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Pid {
-                    format!("TID {}", sort_indicator)
-                } else {
-                    "TID".to_string()
-                })
-                .alignment(Alignment::Right),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Prio {
-                    format!("PRIO {}", sort_indicator)
-                } else {
-                    "PRIO".to_string()
-                })
-                .alignment(Alignment::Right),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::User {
-                    format!("USER {}", sort_indicator)
-                } else {
-                    "USER".to_string()
-                })
-                .alignment(Alignment::Left),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Read {
-                    format!("DISK READ {}", sort_indicator)
-                } else {
-                    "DISK READ".to_string()
-                })
-                .alignment(Alignment::Right),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Write {
-                    format!("DISK WRITE {}", sort_indicator)
-                } else {
-                    "DISK WRITE".to_string()
-                })
-                .alignment(Alignment::Right),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Swapin {
-                    format!("SWAPIN {}", sort_indicator)
-                } else {
-                    "SWAPIN".to_string()
-                })
-                .alignment(Alignment::Right),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Io {
-                    format!("IO {}", sort_indicator)
-                } else {
-                    "IO".to_string()
-                })
-                .alignment(Alignment::Right),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Command {
-                    format!("COMMAND {}", sort_indicator)
-                } else {
-                    "COMMAND".to_string()
-                })
-                .alignment(Alignment::Left),
-            ),
+            Cell::from(Text::from("TID:").right_aligned()),
+            Cell::from(Text::from("PRIO:").right_aligned()),
+            Cell::from(Text::from("USER:").left_aligned()),
+            Cell::from(Text::from("DISK READ:").right_aligned()),
+            Cell::from(Text::from("DISK WRITE:").right_aligned()),
+            Cell::from(Text::from("SWAPIN:").right_aligned()),
+            Cell::from(Text::from("IO:").right_aligned()),
+            Cell::from(Text::from("COMMAND:").left_aligned()),
         ]
     } else {
         vec![
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Pid {
-                    format!("TID {}", sort_indicator)
-                } else {
-                    "TID".to_string()
-                })
-                .alignment(Alignment::Right),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Prio {
-                    format!("PRIO {}", sort_indicator)
-                } else {
-                    "PRIO".to_string()
-                })
-                .alignment(Alignment::Right),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::User {
-                    format!("USER {}", sort_indicator)
-                } else {
-                    "USER".to_string()
-                })
-                .alignment(Alignment::Left),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Read {
-                    format!("DISK READ {}", sort_indicator)
-                } else {
-                    "DISK READ".to_string()
-                })
-                .alignment(Alignment::Right),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Write {
-                    format!("DISK WRITE {}", sort_indicator)
-                } else {
-                    "DISK WRITE".to_string()
-                })
-                .alignment(Alignment::Right),
-            ),
-            Cell::from(
-                Text::from(if state.sort_column == SortColumn::Command {
-                    format!("COMMAND {}", sort_indicator)
-                } else {
-                    "COMMAND".to_string()
-                })
-                .alignment(Alignment::Left),
-            ),
+            Cell::from(Text::from("TID:").right_aligned()),
+            Cell::from(Text::from("PRIO:").right_aligned()),
+            Cell::from(Text::from("USER:").left_aligned()),
+            Cell::from(Text::from("DISK READ:").right_aligned()),
+            Cell::from(Text::from("DISK WRITE:").right_aligned()),
+            Cell::from(Text::from("COMMAND:").left_aligned()),
         ]
     };
 
@@ -550,11 +447,9 @@ fn render_process_table(
         };
 
         let row_style = if process.did_some_io(state.accumulated) {
-            // Active processes - white/light gray
-            Style::default().fg(Color::Rgb(220, 220, 220))
+            Style::default().fg(Color::White)
         } else {
-            // Inactive processes - darker gray
-            Style::default().fg(Color::Rgb(100, 100, 100))
+            Style::default().fg(Color::Gray)
         };
 
         if has_delay_acct {
@@ -612,76 +507,82 @@ fn render_process_table(
         ]
     };
 
+    let sort_row = state.sort_column.as_str();
+
+    let block = Block::default()
+        .title_top(
+            Line::from(vec![
+                Span::raw("┐"),
+                if state.only_active {
+                    Span::styled("o", Style::default().fg(Color::Rgb(100, 180, 255)).bold())
+                } else {
+                    Span::styled("o", Style::default().fg(Color::Rgb(100, 180, 255)))
+                },
+                if state.only_active {
+                    Span::raw("nly-active").bold()
+                } else {
+                    Span::raw("nly-active")
+                },
+                Span::raw("┌"),
+            ])
+            .right_aligned(),
+        )
+        .title_top(
+            Line::from(vec![
+                Span::raw("┐"),
+                if state.accumulated {
+                    Span::styled("a", Style::default().fg(Color::Rgb(100, 180, 255)).bold())
+                } else {
+                    Span::styled("a", Style::default().fg(Color::Rgb(100, 180, 255)))
+                },
+                if state.accumulated {
+                    Span::raw("ccumulated").bold()
+                } else {
+                    Span::raw("ccumulated")
+                },
+                Span::raw("┌"),
+            ])
+            .right_aligned(),
+        )
+        .title_top(
+            Line::from(vec![
+                Span::raw("┐"),
+                if !state.sort_reverse {
+                    Span::styled("r", Style::default().fg(Color::Rgb(100, 180, 255)).bold())
+                } else {
+                    Span::styled("r", Style::default().fg(Color::Rgb(100, 180, 255)))
+                },
+                if !state.sort_reverse {
+                    Span::raw("everse").bold()
+                } else {
+                    Span::raw("everse")
+                },
+                Span::raw("┌"),
+            ])
+            .right_aligned(),
+        )
+        .title_top(
+            Line::from(vec![
+                Span::raw("┐"),
+                Span::styled("← ", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
+                Span::raw(sort_row).bold(),
+                Span::styled(" →", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
+                Span::raw("┌"),
+            ])
+            .right_aligned(),
+        )
+        .bg(Color::Black)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Gray));
+
     let table = Table::default()
         .rows(rows)
         .header(header)
         .widths(widths)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Rgb(100, 100, 100))), // Gray borders
-        );
+        .block(block);
 
     f.render_widget(table, area);
-}
-
-fn render_footer(f: &mut Frame, area: Rect, state: &UIState) {
-    let help_items = vec![
-        Span::styled("q", Style::default().fg(Color::Rgb(100, 180, 255)).bold()), // Soft blue
-        Span::raw(":quit  "),
-        Span::styled("o", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
-        Span::raw(":only-active  "),
-        Span::styled("a", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
-        Span::raw(":accumulated  "),
-        Span::styled("←→", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
-        Span::raw(":sort  "),
-        Span::styled("↑↓", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
-        Span::raw(":reverse  "),
-        Span::styled(
-            "space",
-            Style::default().fg(Color::Rgb(100, 180, 255)).bold(),
-        ),
-        Span::raw(":pause  "),
-    ];
-
-    let status_items = vec![
-        if state.only_active {
-            Span::styled("[ACTIVE]", Style::default().fg(Color::Rgb(100, 180, 255)))
-        // Soft blue
-        } else {
-            Span::styled("[ALL]", Style::default().fg(Color::Rgb(120, 120, 120)))
-            // Medium gray
-        },
-        Span::raw(" "),
-        if state.accumulated {
-            Span::styled("[ACCUM]", Style::default().fg(Color::Rgb(180, 140, 255)))
-        // Soft purple
-        } else {
-            Span::styled("[RATE]", Style::default().fg(Color::Rgb(120, 120, 120)))
-            // Medium gray
-        },
-        Span::raw(" "),
-        if state.paused {
-            Span::styled("[PAUSED]", Style::default().fg(Color::Rgb(255, 140, 140)))
-        // Soft red
-        } else {
-            Span::styled("[LIVE]", Style::default().fg(Color::Rgb(100, 180, 255)))
-            // Soft blue
-        },
-    ];
-
-    let text = vec![Line::from(help_items), Line::from(status_items)];
-
-    let paragraph = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Rgb(100, 100, 100))) // Gray borders
-            .title(" Controls "),
-    );
-
-    f.render_widget(paragraph, area);
 }
 
 pub fn format_bandwidth(bytes: u64, duration: f64) -> String {
