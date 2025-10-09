@@ -17,7 +17,6 @@ pub struct TaskStats {
 static HAS_DELAY_ACCT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl TaskStats {
-
     pub fn has_delay_acct() -> bool {
         HAS_DELAY_ACCT.load(std::sync::atomic::Ordering::Relaxed)
     }

@@ -178,7 +178,11 @@ impl ProcessInfo {
         // Read TGID (parent process ID) from /proc/[tid]/status
         let status = Self::read_proc_status(self.tid);
         if let Some(tgid_str) = status.get("Tgid") {
-            if let Some(tgid) = tgid_str.split_whitespace().next().and_then(|s| s.parse::<i32>().ok()) {
+            if let Some(tgid) = tgid_str
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<i32>().ok())
+            {
                 return tgid;
             }
         }
@@ -500,21 +504,21 @@ impl ProcessList {
                         vec![tgid]
                     };
 
-            for tid in tids {
-                let thread = process
-                    .threads
-                    .entry(tid)
-                    .or_insert_with(|| ThreadInfo::new(tid));
+                    for tid in tids {
+                        let thread = process
+                            .threads
+                            .entry(tid)
+                            .or_insert_with(|| ThreadInfo::new(tid));
 
-                if let Ok(mut conn) = self.taskstats_conn.lock() {
-                    if let Ok(Some(stats)) = conn.get_task_stats(tid) {
-                        thread.update_stats(stats);
-                        let delta = &thread.stats_delta;
-                        total_read += delta.read_bytes;
-                        total_write += delta.write_bytes;
+                        if let Ok(mut conn) = self.taskstats_conn.lock() {
+                            if let Ok(Some(stats)) = conn.get_task_stats(tid) {
+                                thread.update_stats(stats);
+                                let delta = &thread.stats_delta;
+                                total_read += delta.read_bytes;
+                                total_write += delta.write_bytes;
+                            }
+                        }
                     }
-                }
-            }
 
                     process.update_stats();
 
@@ -535,7 +539,11 @@ impl ProcessList {
 
                     // Extract and cache TGID
                     if let Some(tgid_str) = status.get("Tgid") {
-                        if let Some(tgid_val) = tgid_str.split_whitespace().next().and_then(|s| s.parse::<i32>().ok()) {
+                        if let Some(tgid_val) = tgid_str
+                            .split_whitespace()
+                            .next()
+                            .and_then(|s| s.parse::<i32>().ok())
+                        {
                             process.pid = tgid_val;
                         }
                     }
