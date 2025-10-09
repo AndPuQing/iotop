@@ -80,25 +80,6 @@ impl ProcessInfo {
         result
     }
 
-    pub fn get_uid(&mut self) -> Option<u32> {
-        if self.uid.is_none() || self.uid == Some(0) {
-            // Check current UID
-            let status = Self::read_proc_status(self.pid);
-            if let Some(uid_line) = status.get("Uid") {
-                if let Some(uid_str) = uid_line.split_whitespace().next() {
-                    if let Ok(uid) = uid_str.parse::<u32>() {
-                        if uid != self.uid.unwrap_or(u32::MAX) {
-                            self.user = None;
-                            self.uid = Some(uid);
-                        }
-                        return Some(uid);
-                    }
-                }
-            }
-        }
-        self.uid
-    }
-
     pub fn get_user(&self) -> String {
         if let Some(ref user) = self.user {
             // Truncate to 8 characters like original iotop
