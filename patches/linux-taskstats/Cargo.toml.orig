@@ -1,0 +1,38 @@
+[package]
+name = "linux-taskstats"
+version = "0.7.0"
+authors = ["Yuto Kawamura <kawamuray.dadada@gmail.com>"]
+edition = "2018"
+license = "MIT"
+description = "Rust interface to Linux taskstats"
+repository = "https://github.com/kawamuray/linux-taskstats-rs"
+documentation = "https://docs.rs/linux-taskstats"
+readme = "README.md"
+keywords = ["taskstats", "delay-accounting"]
+exclude = [
+    "tools/*",
+    "example/*",
+    "docker-build/*",
+]
+
+[[bin]]
+name = "taskstats"
+path = "src/bin/taskstats/main.rs"
+required-features = ["executable"]
+
+[dependencies]
+libc = "0.2.139"
+netlink-sys = "0.8.6"
+thiserror = "1.0.38"
+log = "0.4.17"
+env_logger = { version = "0.10.0", optional = true }
+prettytable-rs = { version = "0.10.0", optional = true }
+clap = { version = "4.1.1", optional = true }
+
+[features]
+default = ["executable"]
+executable = ["env_logger", "clap", "format"]
+format = ["prettytable-rs"]
+
+[build-dependencies]
+bindgen = "0.69.0"
