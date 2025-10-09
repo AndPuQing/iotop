@@ -2,12 +2,18 @@ use anyhow::Result;
 use nix::unistd::{Uid, User};
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::sync::mpsc;
+use tokio::task;
+use tokio::time::{interval, Duration};
+use tokio_util::sync::CancellationToken;
 
 use crate::taskstats::{TaskStats, TaskStatsConnection};
 
 #[derive(Debug, Clone)]
 pub struct ThreadInfo {
+    #[allow(dead_code)]
     pub tid: i32,
     pub stats_total: Option<TaskStats>,
     pub stats_delta: TaskStats,
@@ -37,9 +43,11 @@ pub struct ProcessInfo {
     pub uid: Option<u32>,
     pub user: Option<String>,
     pub prio: Option<String>,
+    pub cmdline: Option<String>, // Cached cmdline
     pub threads: HashMap<i32, ThreadInfo>,
     pub stats_delta: TaskStats,
     pub stats_accum: TaskStats,
+    #[allow(dead_code)]
     pub stats_accum_timestamp: Instant,
 }
 
@@ -51,6 +59,7 @@ impl ProcessInfo {
             uid: None,
             user: None,
             prio: None,
+            cmdline: None,
             threads: HashMap::new(),
             stats_delta: TaskStats::default(),
             stats_accum: TaskStats::default(),
@@ -90,7 +99,17 @@ impl ProcessInfo {
             return user.clone();
         }
 
-        // Cache miss - compute it
+        // Cache miss - compute it on the fly
+        self.compute_user()
+    }
+
+    pub fn update_user(&mut self) {
+        if self.user.is_none() {
+            self.user = Some(self.compute_user());
+        }
+    }
+
+    fn compute_user(&self) -> String {
         let user_str = if let Some(uid) = self.uid {
             User::from_uid(Uid::from_raw(uid))
                 .ok()
@@ -114,6 +133,17 @@ impl ProcessInfo {
             return prio.clone();
         }
 
+        // Cache miss - compute on the fly
+        self.compute_prio()
+    }
+
+    pub fn update_prio(&mut self) {
+        if self.prio.is_none() {
+            self.prio = Some(self.compute_prio());
+        }
+    }
+
+    fn compute_prio(&self) -> String {
         // Read priority from /proc/[tid]/stat
         let stat_path = format!("/proc/{}/stat", self.tid);
         if let Ok(content) = fs::read_to_string(&stat_path) {
@@ -153,9 +183,26 @@ impl ProcessInfo {
     }
 
     pub fn get_cmdline(&self) -> String {
+        // Return cached value if available
+        if let Some(ref cmdline) = self.cmdline {
+            return cmdline.clone();
+        }
+
+        // Not cached - compute on the fly (should not happen often)
+        self.compute_cmdline()
+    }
+
+    pub fn update_cmdline(&mut self) {
+        if self.cmdline.is_none() {
+            self.cmdline = Some(self.compute_cmdline());
+        }
+    }
+
+    fn compute_cmdline(&self) -> String {
+
         // Read cmdline from the main process (TGID), not the thread
         let cmdline_path = format!("/proc/{}/cmdline", self.pid);
-        if let Ok(cmdline) = fs::read_to_string(&cmdline_path) {
+        let result = if let Ok(cmdline) = fs::read_to_string(&cmdline_path) {
             if !cmdline.is_empty() {
                 let mut parts: Vec<String> = cmdline
                     .split('\0')
@@ -211,23 +258,44 @@ impl ProcessInfo {
                         }
                     }
 
-                    return cmd;
+                    cmd
+                } else {
+                    "{no such process}".to_string()
                 }
-            }
-        }
-
-        // Kernel thread - get name from status (use tid for kernel threads)
-        if let Ok(status) = fs::read_to_string(format!("/proc/{}/status", self.tid)) {
-            for line in status.lines() {
-                if line.starts_with("Name:") {
-                    if let Some(name) = line.split(':').nth(1) {
-                        return format!("[{}]", name.trim());
+            } else {
+                // Kernel thread - get name from status (use tid for kernel threads)
+                if let Ok(status) = fs::read_to_string(format!("/proc/{}/status", self.tid)) {
+                    if let Some(line) = status.lines().find(|line| line.starts_with("Name:")) {
+                        if let Some(name) = line.split(':').nth(1) {
+                            format!("[{}]", name.trim())
+                        } else {
+                            "{no such process}".to_string()
+                        }
+                    } else {
+                        "{no such process}".to_string()
                     }
+                } else {
+                    "{no such process}".to_string()
                 }
             }
-        }
+        } else {
+            // Kernel thread - get name from status (use tid for kernel threads)
+            if let Ok(status) = fs::read_to_string(format!("/proc/{}/status", self.tid)) {
+                if let Some(line) = status.lines().find(|line| line.starts_with("Name:")) {
+                    if let Some(name) = line.split(':').nth(1) {
+                        format!("[{}]", name.trim())
+                    } else {
+                        "{no such process}".to_string()
+                    }
+                } else {
+                    "{no such process}".to_string()
+                }
+            } else {
+                "{no such process}".to_string()
+            }
+        };
 
-        "{no such process}".to_string()
+        result
     }
 
     pub fn did_some_io(&self, accumulated: bool) -> bool {
@@ -261,9 +329,17 @@ impl ProcessInfo {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ProcessSnapshot {
+    pub processes: HashMap<i32, ProcessInfo>,
+    pub total_io: (u64, u64),
+    pub actual_io: (u64, u64),
+    pub duration: f64,
+}
+
 pub struct ProcessList {
     pub processes: HashMap<i32, ProcessInfo>,
-    pub taskstats_conn: TaskStatsConnection,
+    pub taskstats_conn: Arc<Mutex<TaskStatsConnection>>,
     pub timestamp: Instant,
     pub duration: f64,
     pub prev_pgpgin: Option<u64>,
@@ -274,12 +350,87 @@ impl ProcessList {
     pub fn new(taskstats_conn: TaskStatsConnection) -> Self {
         Self {
             processes: HashMap::new(),
-            taskstats_conn,
+            taskstats_conn: Arc::new(Mutex::new(taskstats_conn)),
             timestamp: Instant::now(),
             duration: 0.0,
             prev_pgpgin: None,
             prev_pgpgout: None,
         }
+    }
+
+    pub fn spawn_refresh_stream(
+        update_rate: f64,
+        show_processes: bool,
+        taskstats_conn: Arc<Mutex<TaskStatsConnection>>,
+        cancellation_token: CancellationToken,
+    ) -> mpsc::UnboundedReceiver<ProcessSnapshot> {
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        task::spawn(async move {
+            let mut tick_interval = interval(Duration::from_secs_f64(1.0 / update_rate));
+            let mut processes: HashMap<i32, ProcessInfo> = HashMap::new();
+            let mut timestamp = Instant::now();
+            let mut duration = 0.0;
+            let mut prev_pgpgin: Option<u64> = None;
+            let mut prev_pgpgout: Option<u64> = None;
+
+            loop {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        break;
+                    }
+                    _ = tick_interval.tick() => {
+                        // Refresh process data in blocking task to avoid blocking async runtime
+                        let taskstats_conn_clone = taskstats_conn.clone();
+                        let processes_clone = processes.clone();
+
+                        let result = task::spawn_blocking(move || {
+                            let mut temp_list = ProcessList {
+                                processes: processes_clone,
+                                taskstats_conn: taskstats_conn_clone,
+                                timestamp,
+                                duration,
+                                prev_pgpgin,
+                                prev_pgpgout,
+                            };
+
+                            let io_stats = temp_list.refresh_processes(show_processes)?;
+                            Ok::<_, anyhow::Error>((temp_list, io_stats))
+                        }).await;
+
+                        match result {
+                            Ok(Ok((updated_list, (total_io, actual_io)))) => {
+                                // Update our state
+                                processes = updated_list.processes;
+                                timestamp = updated_list.timestamp;
+                                duration = updated_list.duration;
+                                prev_pgpgin = updated_list.prev_pgpgin;
+                                prev_pgpgout = updated_list.prev_pgpgout;
+
+                                // Send snapshot
+                                let snapshot = ProcessSnapshot {
+                                    processes: processes.clone(),
+                                    total_io,
+                                    actual_io,
+                                    duration,
+                                };
+
+                                if tx.send(snapshot).is_err() {
+                                    // Receiver dropped, stop the stream
+                                    break;
+                                }
+                            }
+                            Ok(Err(_)) | Err(_) => {
+                                // Error refreshing, continue to next iteration
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        rx
     }
 
     fn read_vmstat(&self) -> Result<(u64, u64)> {
@@ -399,16 +550,23 @@ impl ProcessList {
                     .entry(tid)
                     .or_insert_with(|| ThreadInfo::new(tid));
 
-                if let Ok(Some(stats)) = self.taskstats_conn.get_task_stats(tid) {
-                    thread.update_stats(stats);
-                    let delta = &thread.stats_delta;
-                    total_read += delta.read_bytes;
-                    total_write += delta.write_bytes;
+                if let Ok(mut conn) = self.taskstats_conn.lock() {
+                    if let Ok(Some(stats)) = conn.get_task_stats(tid) {
+                        thread.update_stats(stats);
+                        let delta = &thread.stats_delta;
+                        total_read += delta.read_bytes;
+                        total_write += delta.write_bytes;
+                    }
                 }
             }
 
             process.update_stats();
             process.get_uid();
+
+            // Cache metadata to avoid repeated reads during rendering
+            process.update_cmdline();
+            process.update_user();
+            process.update_prio();
 
             // Update PID to be the TGID (parent process ID)
             process.pid = process.get_tgid();

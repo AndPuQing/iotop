@@ -3,7 +3,7 @@ use linux_taskstats::{Client, TaskStats as KernelTaskStats};
 
 // Our TaskStats structure that contains the fields we care about
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct TaskStats {
     pub version: u16,
     pub blkio_delay_total: u64,
@@ -17,16 +17,6 @@ pub struct TaskStats {
 static HAS_DELAY_ACCT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl TaskStats {
-    pub fn default() -> Self {
-        Self {
-            version: 0,
-            blkio_delay_total: 0,
-            swapin_delay_total: 0,
-            read_bytes: 0,
-            write_bytes: 0,
-            cancelled_write_bytes: 0,
-        }
-    }
 
     pub fn has_delay_acct() -> bool {
         HAS_DELAY_ACCT.load(std::sync::atomic::Ordering::Relaxed)

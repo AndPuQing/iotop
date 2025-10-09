@@ -1,58 +1,61 @@
-use crate::process::ProcessInfo;
-use crate::taskstats::TaskStats;
+use anyhow::Result;
 use crossterm::{
-    cursor::{Hide, MoveTo, Show},
-    event::{self, Event, KeyCode, KeyEvent},
+    cursor,
+    event::{Event as CrosstermEvent, EventStream, KeyEvent, KeyEventKind, MouseEvent},
     execute,
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::io::{self, Write};
+use futures::{FutureExt, StreamExt};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table},
+    Frame, Terminal,
+};
+use std::io::{self, Stdout};
+use std::ops::{Deref, DerefMut};
 use std::time::Duration;
+use tokio::{
+    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    task::JoinHandle,
+    time::interval,
+};
+use tokio_util::sync::CancellationToken;
 
-const UNITS: &[&str] = &["B", "K", "M", "G", "T", "P", "E"];
+use crate::process::ProcessInfo;
 
-pub fn human_size(size: i64) -> String {
-    let (sign, size) = if size < 0 {
-        ("-", -size as f64)
-    } else {
-        ("", size as f64)
-    };
-
-    if size == 0.0 {
-        return "0.00 B".to_string();
-    }
-
-    let expo = ((size / 2.0).log2() / 10.0) as usize;
-    let expo = expo.min(UNITS.len() - 1);
-
-    format!(
-        "{}{:.2} {}",
-        sign,
-        size / (1u64 << (10 * expo)) as f64,
-        UNITS[expo]
-    )
+#[derive(Debug, Clone)]
+pub enum Event {
+    Init,
+    #[allow(dead_code)]
+    Quit,
+    Error,
+    Tick,
+    Render,
+    Key(KeyEvent),
+    #[allow(dead_code)]
+    Mouse(MouseEvent),
+    #[allow(dead_code)]
+    Resize(u16, u16),
+    DataUpdate(crate::process::ProcessSnapshot),
 }
 
-pub fn format_bandwidth(bytes: u64, duration: f64) -> String {
-    if duration > 0.0 {
-        format!("{}/s", human_size((bytes as f64 / duration) as i64))
-    } else {
-        "0.00 B/s".to_string()
-    }
+pub struct Tui {
+    pub terminal: Terminal<CrosstermBackend<Stdout>>,
+    pub task: JoinHandle<()>,
+    pub cancellation_token: CancellationToken,
+    pub event_rx: UnboundedReceiver<Event>,
+    pub event_tx: UnboundedSender<Event>,
+    pub frame_rate: f64,
+    pub tick_rate: f64,
 }
 
-pub fn format_delay_percent(delay_ns: u64, duration: f64) -> String {
-    let percent = if duration > 0.0 {
-        (delay_ns as f64 / (duration * 10_000_000.0)).min(99.99)
-    } else {
-        0.0
-    };
-    format!("{:.2} %", percent)
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SortColumn {
     Pid,
+    Prio,
     User,
     Read,
     Write,
@@ -62,246 +65,577 @@ pub enum SortColumn {
 }
 
 impl SortColumn {
-    pub fn next(&self) -> Self {
+    // Cycle right: TID → PRIO → USER → READ → WRITE → SWAPIN → IO → COMMAND → TID
+    pub fn cycle_forward(&self) -> Self {
         match self {
-            Self::Pid => Self::User,
-            Self::User => Self::Read,
-            Self::Read => Self::Write,
-            Self::Write => Self::Swapin,
-            Self::Swapin => Self::Io,
-            Self::Io => Self::Command,
-            Self::Command => Self::Command,
+            SortColumn::Pid => SortColumn::Prio,
+            SortColumn::Prio => SortColumn::User,
+            SortColumn::User => SortColumn::Read,
+            SortColumn::Read => SortColumn::Write,
+            SortColumn::Write => SortColumn::Swapin,
+            SortColumn::Swapin => SortColumn::Io,
+            SortColumn::Io => SortColumn::Command,
+            SortColumn::Command => SortColumn::Pid,
         }
     }
 
-    pub fn prev(&self) -> Self {
+    // Cycle left: TID ← PRIO ← USER ← READ ← WRITE ← SWAPIN ← IO ← COMMAND ← TID
+    pub fn cycle_backward(&self) -> Self {
         match self {
-            Self::Pid => Self::Pid,
-            Self::User => Self::Pid,
-            Self::Read => Self::User,
-            Self::Write => Self::Read,
-            Self::Swapin => Self::Write,
-            Self::Io => Self::Swapin,
-            Self::Command => Self::Io,
+            SortColumn::Pid => SortColumn::Command,
+            SortColumn::Prio => SortColumn::Pid,
+            SortColumn::User => SortColumn::Prio,
+            SortColumn::Read => SortColumn::User,
+            SortColumn::Write => SortColumn::Read,
+            SortColumn::Swapin => SortColumn::Write,
+            SortColumn::Io => SortColumn::Swapin,
+            SortColumn::Command => SortColumn::Io,
         }
     }
 }
 
-pub struct UI {
-    width: u16,
-    height: u16,
-    sort_column: SortColumn,
-    sort_reverse: bool,
-    show_only_active: bool,
-    accumulated: bool,
+pub struct UIState {
+    pub only_active: bool,
+    pub accumulated: bool,
+    pub sort_column: SortColumn,
+    pub sort_reverse: bool,
+    pub paused: bool,
 }
 
-impl UI {
-    pub fn new() -> io::Result<Self> {
-        let (width, height) = terminal::size()?;
-        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
-        terminal::enable_raw_mode()?;
-
-        Ok(Self {
-            width,
-            height,
+impl Default for UIState {
+    fn default() -> Self {
+        Self {
+            only_active: false,
+            accumulated: false,
             sort_column: SortColumn::Io,
             sort_reverse: true,
-            show_only_active: false,
-            accumulated: false,
+            paused: false,
+        }
+    }
+}
+
+impl Tui {
+    pub fn new() -> Result<Self> {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        Ok(Self {
+            terminal: Terminal::new(CrosstermBackend::new(io::stdout()))?,
+            task: tokio::spawn(async {}),
+            cancellation_token: CancellationToken::new(),
+            event_rx,
+            event_tx,
+            frame_rate: 60.0,
+            tick_rate: 1.0, // 1 Hz for iotop data updates
         })
     }
 
-    pub fn cleanup(&self) -> io::Result<()> {
-        terminal::disable_raw_mode()?;
-        execute!(io::stdout(), LeaveAlternateScreen, Show)?;
-        Ok(())
-    }
 
-    pub fn handle_input(&mut self) -> io::Result<bool> {
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(KeyEvent { code, .. }) = event::read()? {
-                match code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(true),
-                    KeyCode::Char('r') | KeyCode::Char('R') => {
-                        self.sort_reverse = !self.sort_reverse
-                    }
-                    KeyCode::Char('a') | KeyCode::Char('A') => self.accumulated = !self.accumulated,
-                    KeyCode::Char('o') | KeyCode::Char('O') => {
-                        self.show_only_active = !self.show_only_active
-                    }
-                    KeyCode::Left => self.sort_column = self.sort_column.prev(),
-                    KeyCode::Right => self.sort_column = self.sort_column.next(),
-                    _ => {}
-                }
-            }
-        }
-        Ok(false)
-    }
-
-    pub fn render(
-        &mut self,
-        processes: &mut Vec<&ProcessInfo>,
-        total: (u64, u64),
-        actual: (u64, u64),
-        duration: f64,
-    ) -> io::Result<()> {
-        let (width, height) = terminal::size()?;
-        self.width = width;
-        self.height = height;
-
-        let mut stdout = io::stdout();
-        execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
-
-        // Summary lines
-        writeln!(
-            stdout,
-            "Total DISK READ :   {:>14} | Total DISK WRITE :   {:>14}",
-            format_bandwidth(total.0, duration),
-            format_bandwidth(total.1, duration)
-        )?;
-        writeln!(
-            stdout,
-            "Actual DISK READ:   {:>14} | Actual DISK WRITE:   {:>14}",
-            format_bandwidth(actual.0, duration),
-            format_bandwidth(actual.1, duration)
-        )?;
-
-        // Title line
-        execute!(stdout, MoveTo(0, 3))?;
-        let has_delay = TaskStats::has_delay_acct();
-        if has_delay {
-            write!(
-                stdout,
-                "{:>7}  {:>4}  {:<8}     {:>10}  {:>11}  {:>6}      {:>2}    COMMAND",
-                "TID", "PRIO", "USER", "DISK READ", "DISK WRITE", "SWAPIN", "IO"
-            )?;
-        } else {
-            write!(
-                stdout,
-                "{:>7}  {:>4}  {:<8}     {:>10}  {:>11} {} COMMAND",
-                "TID", "PRIO", "USER", "DISK READ", "DISK WRITE", "?unavailable?"
-            )?;
-        }
-
-        // Filter and sort processes
-        if self.show_only_active {
-            processes.retain(|p| p.did_some_io(self.accumulated));
-        }
-
-        let sort_col = self.sort_column;
-        let accumulated = self.accumulated;
-        let sort_reverse = self.sort_reverse;
-        processes.sort_by(|a, b| {
-            let stats_a = if accumulated {
-                &a.stats_accum
-            } else {
-                &a.stats_delta
-            };
-            let stats_b = if accumulated {
-                &b.stats_accum
-            } else {
-                &b.stats_delta
-            };
-
-            let cmp = match sort_col {
-                SortColumn::Pid => a.tid.cmp(&b.tid),
-                SortColumn::User => a.get_user().cmp(&b.get_user()),
-                SortColumn::Read => stats_a.read_bytes.cmp(&stats_b.read_bytes),
-                SortColumn::Write => {
-                    let write_a = stats_a
-                        .write_bytes
-                        .saturating_sub(stats_a.cancelled_write_bytes);
-                    let write_b = stats_b
-                        .write_bytes
-                        .saturating_sub(stats_b.cancelled_write_bytes);
-                    write_a.cmp(&write_b)
-                }
-                SortColumn::Swapin => stats_a.swapin_delay_total.cmp(&stats_b.swapin_delay_total),
-                SortColumn::Io => stats_a.blkio_delay_total.cmp(&stats_b.blkio_delay_total),
-                SortColumn::Command => a.get_cmdline().cmp(&b.get_cmdline()),
-            };
-
-            let primary = if sort_reverse { cmp.reverse() } else { cmp };
-
-            // Group by parent PID (TGID), then sort by TID within each group
-            primary
-                .then_with(|| a.pid.cmp(&b.pid))
-                .then_with(|| a.tid.cmp(&b.tid))
+    pub fn start(&mut self) {
+        self.cancel(); // Cancel any existing task
+        self.cancellation_token = CancellationToken::new();
+        let event_loop = Self::event_loop(
+            self.event_tx.clone(),
+            self.cancellation_token.clone(),
+            self.tick_rate,
+            self.frame_rate,
+        );
+        self.task = tokio::spawn(async {
+            event_loop.await;
         });
+    }
 
-        // Display processes
-        let max_lines = (height as usize).saturating_sub(5);
-        for (i, process) in processes.iter().take(max_lines).enumerate() {
-            execute!(stdout, MoveTo(0, 4 + i as u16))?;
+    async fn event_loop(
+        event_tx: UnboundedSender<Event>,
+        cancellation_token: CancellationToken,
+        tick_rate: f64,
+        frame_rate: f64,
+    ) {
+        let mut event_stream = EventStream::new();
+        let mut tick_interval = interval(Duration::from_secs_f64(1.0 / tick_rate));
+        let mut render_interval = interval(Duration::from_secs_f64(1.0 / frame_rate));
 
-            let stats = if self.accumulated {
-                &process.stats_accum
-            } else {
-                &process.stats_delta
-            };
+        // Send init event
+        let _ = event_tx.send(Event::Init);
 
-            let read_str = if accumulated {
-                human_size(stats.read_bytes as i64)
-            } else {
-                format_bandwidth(stats.read_bytes, duration)
-            };
-
-            let write_bytes = stats
-                .write_bytes
-                .saturating_sub(stats.cancelled_write_bytes);
-            let write_str = if accumulated {
-                human_size(write_bytes as i64)
-            } else {
-                format_bandwidth(write_bytes, duration)
-            };
-
-            let mut cmdline = process.get_cmdline();
-
-            if has_delay {
-                let io_delay = format_delay_percent(stats.blkio_delay_total, duration);
-                let swapin_delay = format_delay_percent(stats.swapin_delay_total, duration);
-
-                let remaining = (width as usize).saturating_sub(65);
-                if cmdline.len() > remaining {
-                    cmdline.truncate(remaining.saturating_sub(1));
-                    cmdline.push('~');
+        loop {
+            let event = tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    break;
                 }
-
-                write!(
-                    stdout,
-                    "{:>7}  {:>4}  {:<8} {:>11} {:>11}  {:>6}      {:>2} {}",
-                    process.tid,
-                    process.get_prio(),
-                    process.get_user(),
-                    read_str,
-                    write_str,
-                    swapin_delay,
-                    io_delay,
-                    cmdline
-                )?;
-            } else {
-                let remaining = (width as usize).saturating_sub(65);
-                if cmdline.len() > remaining {
-                    cmdline.truncate(remaining.saturating_sub(1));
-                    cmdline.push('~');
-                }
-
-                write!(
-                    stdout,
-                    "{:>7}  {:>4}  {:<8} {:>11} {:>11} {} {}",
-                    process.tid,
-                    process.get_prio(),
-                    process.get_user(),
-                    read_str,
-                    write_str,
-                    "?unavailable?",
-                    cmdline
-                )?;
+                _ = tick_interval.tick() => Event::Tick,
+                _ = render_interval.tick() => Event::Render,
+                crossterm_event = event_stream.next().fuse() => match crossterm_event {
+                    Some(Ok(event)) => match event {
+                        CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => Event::Key(key),
+                        CrosstermEvent::Mouse(mouse) => Event::Mouse(mouse),
+                        CrosstermEvent::Resize(x, y) => Event::Resize(x, y),
+                        _ => continue, // ignore other events
+                    }
+                    Some(Err(_)) => Event::Error,
+                    None => break, // the event stream has stopped
+                },
+            };
+            if event_tx.send(event).is_err() {
+                // the receiver has been dropped
+                break;
             }
         }
+        cancellation_token.cancel();
+    }
 
-        stdout.flush()?;
+    pub fn stop(&self) -> Result<()> {
+        self.cancel();
+        let mut counter = 0;
+        while !self.task.is_finished() {
+            std::thread::sleep(Duration::from_millis(1));
+            counter += 1;
+            if counter > 50 {
+                self.task.abort();
+            }
+            if counter > 100 {
+                break;
+            }
+        }
         Ok(())
     }
+
+    pub fn enter(&mut self) -> Result<()> {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen, cursor::Hide)?;
+        self.start();
+        Ok(())
+    }
+
+    pub fn exit(&mut self) -> Result<()> {
+        self.stop()?;
+        if crossterm::terminal::is_raw_mode_enabled()? {
+            self.terminal.flush()?;
+            execute!(io::stdout(), LeaveAlternateScreen, cursor::Show)?;
+            disable_raw_mode()?;
+        }
+        Ok(())
+    }
+
+    pub fn cancel(&self) {
+        self.cancellation_token.cancel();
+    }
+
+    pub async fn next_event(&mut self) -> Option<Event> {
+        self.event_rx.recv().await
+    }
+
+    pub fn draw(
+        &mut self,
+        processes: &[&ProcessInfo],
+        total_io: (u64, u64),
+        actual_io: (u64, u64),
+        duration: f64,
+        state: &UIState,
+        has_delay_acct: bool,
+    ) -> Result<()> {
+        self.terminal.draw(|f| {
+            render_ui(
+                f,
+                processes,
+                total_io,
+                actual_io,
+                duration,
+                state,
+                has_delay_acct,
+            );
+        })?;
+        Ok(())
+    }
+}
+
+impl Deref for Tui {
+    type Target = Terminal<CrosstermBackend<Stdout>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.terminal
+    }
+}
+
+impl DerefMut for Tui {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.terminal
+    }
+}
+
+impl Drop for Tui {
+    fn drop(&mut self) {
+        let _ = self.exit();
+    }
+}
+
+fn render_ui(
+    f: &mut Frame,
+    processes: &[&ProcessInfo],
+    total_io: (u64, u64),
+    actual_io: (u64, u64),
+    duration: f64,
+    state: &UIState,
+    has_delay_acct: bool,
+) {
+    let size = f.area();
+
+    // Create main layout: header + content + footer
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(4), // Header with I/O stats
+            Constraint::Min(5),    // Process table
+            Constraint::Length(3), // Footer with help
+        ])
+        .split(size);
+
+    // Render header
+    render_header(f, chunks[0], total_io, actual_io, duration);
+
+    // Render process table
+    render_process_table(f, chunks[1], processes, duration, state, has_delay_acct);
+
+    // Render footer
+    render_footer(f, chunks[2], state);
+}
+
+fn render_header(
+    f: &mut Frame,
+    area: Rect,
+    total_io: (u64, u64),
+    actual_io: (u64, u64),
+    duration: f64,
+) {
+    let total_read_str = format_bandwidth(total_io.0, duration);
+    let total_write_str = format_bandwidth(total_io.1, duration);
+    let actual_read_str = format_bandwidth(actual_io.0, duration);
+    let actual_write_str = format_bandwidth(actual_io.1, duration);
+
+    let text = vec![
+        Line::from(vec![
+            Span::styled(
+                "Total DISK READ: ",
+                Style::default().fg(Color::Rgb(180, 180, 180)),
+            ),
+            Span::styled(
+                format!("{:>12}", total_read_str),
+                Style::default().fg(Color::Rgb(100, 180, 255)), // Soft blue
+            ),
+            Span::raw("  │  "),
+            Span::styled(
+                "Total DISK WRITE: ",
+                Style::default().fg(Color::Rgb(180, 180, 180)),
+            ),
+            Span::styled(
+                format!("{:>12}", total_write_str),
+                Style::default().fg(Color::Rgb(255, 140, 140)), // Soft red/pink
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "Actual DISK READ: ",
+                Style::default().fg(Color::Rgb(140, 140, 140)),
+            ),
+            Span::styled(
+                format!("{:>11}", actual_read_str),
+                Style::default().fg(Color::Rgb(100, 180, 255)), // Soft blue
+            ),
+            Span::raw("  │  "),
+            Span::styled(
+                "Actual DISK WRITE: ",
+                Style::default().fg(Color::Rgb(140, 140, 140)),
+            ),
+            Span::styled(
+                format!("{:>11}", actual_write_str),
+                Style::default().fg(Color::Rgb(255, 140, 140)), // Soft red/pink
+            ),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(100, 100, 100))) // Gray borders
+        .title(" iotop - I/O Monitor ");
+
+    let paragraph = Paragraph::new(text).block(block);
+    f.render_widget(paragraph, area);
+}
+
+fn render_process_table(
+    f: &mut Frame,
+    area: Rect,
+    processes: &[&ProcessInfo],
+    duration: f64,
+    state: &UIState,
+    has_delay_acct: bool,
+) {
+    let header_style = Style::default()
+        .fg(Color::Rgb(200, 200, 200)) // Light gray
+        .add_modifier(Modifier::BOLD);
+
+    let sort_indicator = if state.sort_reverse { "▼" } else { "▲" };
+
+    let header_cells = if has_delay_acct {
+        vec![
+            Cell::from(if state.sort_column == SortColumn::Pid {
+                format!("TID {}", sort_indicator)
+            } else {
+                "TID".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::Prio {
+                format!("PRIO {}", sort_indicator)
+            } else {
+                "PRIO".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::User {
+                format!("USER {}", sort_indicator)
+            } else {
+                "USER".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::Read {
+                format!("DISK READ {}", sort_indicator)
+            } else {
+                "DISK READ".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::Write {
+                format!("DISK WRITE {}", sort_indicator)
+            } else {
+                "DISK WRITE".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::Swapin {
+                format!("SWAPIN {}", sort_indicator)
+            } else {
+                "SWAPIN".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::Io {
+                format!("IO {}", sort_indicator)
+            } else {
+                "IO".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::Command {
+                format!("COMMAND {}", sort_indicator)
+            } else {
+                "COMMAND".to_string()
+            }),
+        ]
+    } else {
+        vec![
+            Cell::from(if state.sort_column == SortColumn::Pid {
+                format!("TID {}", sort_indicator)
+            } else {
+                "TID".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::Prio {
+                format!("PRIO {}", sort_indicator)
+            } else {
+                "PRIO".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::User {
+                format!("USER {}", sort_indicator)
+            } else {
+                "USER".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::Read {
+                format!("DISK READ {}", sort_indicator)
+            } else {
+                "DISK READ".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::Write {
+                format!("DISK WRITE {}", sort_indicator)
+            } else {
+                "DISK WRITE".to_string()
+            }),
+            Cell::from(if state.sort_column == SortColumn::Command {
+                format!("COMMAND {}", sort_indicator)
+            } else {
+                "COMMAND".to_string()
+            }),
+        ]
+    };
+
+    let header = Row::new(header_cells).style(header_style).height(1);
+
+    let rows = processes.iter().map(|process| {
+        let stats = if state.accumulated {
+            &process.stats_accum
+        } else {
+            &process.stats_delta
+        };
+
+        let read_str = if state.accumulated {
+            human_size(stats.read_bytes as i64)
+        } else {
+            format_bandwidth(stats.read_bytes, duration)
+        };
+
+        let write_bytes = stats
+            .write_bytes
+            .saturating_sub(stats.cancelled_write_bytes);
+        let write_str = if state.accumulated {
+            human_size(write_bytes as i64)
+        } else {
+            format_bandwidth(write_bytes, duration)
+        };
+
+        let row_style = if process.did_some_io(state.accumulated) {
+            // Active processes - white/light gray
+            Style::default().fg(Color::Rgb(220, 220, 220))
+        } else {
+            // Inactive processes - darker gray
+            Style::default().fg(Color::Rgb(100, 100, 100))
+        };
+
+        if has_delay_acct {
+            let io_delay = format_delay_percent(stats.blkio_delay_total, duration);
+            let swapin_delay = format_delay_percent(stats.swapin_delay_total, duration);
+
+            Row::new(vec![
+                Cell::from(format!("{:>7}", process.tid)),
+                Cell::from(format!("{:>4}", process.get_prio())),
+                Cell::from(format!("{:<8}", process.get_user())),
+                Cell::from(format!("{:>11}", read_str))
+                    .style(Style::default().fg(Color::Rgb(100, 180, 255))), // Soft blue
+                Cell::from(format!("{:>11}", write_str))
+                    .style(Style::default().fg(Color::Rgb(255, 140, 140))), // Soft red/pink
+                Cell::from(format!("{:>6}", swapin_delay)),
+                Cell::from(format!("{:>2}", io_delay))
+                    .style(Style::default().fg(Color::Rgb(180, 140, 255))), // Soft purple
+                Cell::from(process.get_cmdline()),
+            ])
+            .style(row_style)
+        } else {
+            Row::new(vec![
+                Cell::from(format!("{:>7}", process.tid)),
+                Cell::from(format!("{:>4}", process.get_prio())),
+                Cell::from(format!("{:<8}", process.get_user())),
+                Cell::from(format!("{:>11}", read_str))
+                    .style(Style::default().fg(Color::Rgb(100, 180, 255))), // Soft blue
+                Cell::from(format!("{:>11}", write_str))
+                    .style(Style::default().fg(Color::Rgb(255, 140, 140))), // Soft red/pink
+                Cell::from(process.get_cmdline()),
+            ])
+            .style(row_style)
+        }
+    });
+
+    let widths = if has_delay_acct {
+        vec![
+            Constraint::Length(8),  // TID
+            Constraint::Length(5),  // PRIO
+            Constraint::Length(9),  // USER
+            Constraint::Length(12), // DISK READ
+            Constraint::Length(12), // DISK WRITE
+            Constraint::Length(7),  // SWAPIN
+            Constraint::Length(3),  // IO
+            Constraint::Min(20),    // COMMAND
+        ]
+    } else {
+        vec![
+            Constraint::Length(8),  // TID
+            Constraint::Length(5),  // PRIO
+            Constraint::Length(9),  // USER
+            Constraint::Length(12), // DISK READ
+            Constraint::Length(12), // DISK WRITE
+            Constraint::Min(20),    // COMMAND
+        ]
+    };
+
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Rgb(100, 100, 100))), // Gray borders
+    );
+
+    f.render_widget(table, area);
+}
+
+fn render_footer(f: &mut Frame, area: Rect, state: &UIState) {
+    let help_items = vec![
+        Span::styled("q", Style::default().fg(Color::Rgb(100, 180, 255)).bold()), // Soft blue
+        Span::raw(":quit  "),
+        Span::styled("o", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
+        Span::raw(":only-active  "),
+        Span::styled("a", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
+        Span::raw(":accumulated  "),
+        Span::styled("r", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
+        Span::raw(":reverse  "),
+        Span::styled("←→", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
+        Span::raw(":sort  "),
+        Span::styled(
+            "space",
+            Style::default().fg(Color::Rgb(100, 180, 255)).bold(),
+        ),
+        Span::raw(":pause  "),
+    ];
+
+    let status_items = vec![
+        if state.only_active {
+            Span::styled("[ACTIVE]", Style::default().fg(Color::Rgb(100, 180, 255)))
+        // Soft blue
+        } else {
+            Span::styled("[ALL]", Style::default().fg(Color::Rgb(120, 120, 120)))
+            // Medium gray
+        },
+        Span::raw(" "),
+        if state.accumulated {
+            Span::styled("[ACCUM]", Style::default().fg(Color::Rgb(180, 140, 255)))
+        // Soft purple
+        } else {
+            Span::styled("[RATE]", Style::default().fg(Color::Rgb(120, 120, 120)))
+            // Medium gray
+        },
+        Span::raw(" "),
+        if state.paused {
+            Span::styled("[PAUSED]", Style::default().fg(Color::Rgb(255, 140, 140)))
+        // Soft red
+        } else {
+            Span::styled("[LIVE]", Style::default().fg(Color::Rgb(100, 180, 255)))
+            // Soft blue
+        },
+    ];
+
+    let text = vec![Line::from(help_items), Line::from(status_items)];
+
+    let paragraph = Paragraph::new(text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Rgb(100, 100, 100))) // Gray borders
+            .title(" Controls "),
+    );
+
+    f.render_widget(paragraph, area);
+}
+
+pub fn format_bandwidth(bytes: u64, duration: f64) -> String {
+    if duration <= 0.0 {
+        return "0 B/s".to_string();
+    }
+    let bytes_per_sec = bytes as f64 / duration;
+    human_size(bytes_per_sec as i64) + "/s"
+}
+
+pub fn human_size(bytes: i64) -> String {
+    const UNITS: &[&str] = &["B", "K", "M", "G", "T", "P"];
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+
+    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+
+    if unit_idx == 0 {
+        format!("{:.0} {}", size, UNITS[unit_idx])
+    } else if size >= 10.0 {
+        format!("{:.1} {}", size, UNITS[unit_idx])
+    } else {
+        format!("{:.2} {}", size, UNITS[unit_idx])
+    }
+}
+
+pub fn format_delay_percent(delay_ns: u64, duration: f64) -> String {
+    if duration <= 0.0 {
+        return "0.00 %".to_string();
+    }
+    let percent = (delay_ns as f64 / (duration * 1_000_000_000.0)) * 100.0;
+    format!("{:.2} %", percent)
 }

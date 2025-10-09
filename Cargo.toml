@@ -2,12 +2,8 @@
 name = "iotop"
 description = "A Rust implementation of iotop"
 license = "MIT"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-
-[lib]
-name = "iotop"
-path = "src/lib.rs"
 
 [[bin]]
 name = "iotop"
@@ -17,16 +13,19 @@ path = "src/main.rs"
 argh = "0.1"
 nix = { version = "0.29", features = ["process", "user"] }
 anyhow = { version = "1.0", features = ["std"] }
-crossterm = "0.28"
+crossterm = { version = "0.29.0", features = ["serde", "event-stream"] }
+ratatui = "0.29"
 libc = { version = "0.2", features = ["std"] }
 linux-taskstats = { version = "0.7", features = ["executable"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
 
 [patch.crates-io]
 linux-taskstats = { path = "patches/linux-taskstats" }
 
 [profile.release]
-strip = true
-opt-level = "z"
-lto = true
 codegen-units = 1
-panic = "abort"
+strip = true
+lto = true
+opt-level = "z"
