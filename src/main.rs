@@ -1,3 +1,4 @@
+mod ioprio;
 mod proc_reader;
 mod process;
 mod taskstats;

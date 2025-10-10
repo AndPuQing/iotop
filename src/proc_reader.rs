@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 /// Cache Time-To-Live policy for different data types
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 enum CacheTTL {
     /// Never expire - for static data like UID, TGID, cmdline
     Static,
@@ -137,34 +138,6 @@ impl ProcReader {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Failed to parse status"))
     }
 
-    /// Extract nice value from /proc/[tid]/stat
-    fn read_nice(&mut self) -> io::Result<i32> {
-        let path = format!("/proc/{}/stat", self.tid);
-        let content = self
-            .cache
-            .read(path, CacheTTL::Refresh(Duration::from_secs(2)))?;
-
-        // Parse stat file to extract nice value (field 19, 0-indexed field 18)
-        // Format: pid (comm) state ... priority nice ...
-        let _start = content
-            .find('(')
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid stat format"))?;
-        let end = content
-            .rfind(')')
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid stat format"))?;
-
-        let rest = &content[end + 1..];
-        let parts: Vec<&str> = rest.split_whitespace().collect();
-
-        if parts.len() < 17 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Stat too short"));
-        }
-
-        parts[16]
-            .parse()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Failed to parse nice value"))
-    }
-
     /// Read /proc/[tid]/cmdline
     fn cmdline(&mut self, pid: i32) -> io::Result<String> {
         let path = format!("/proc/{}/cmdline", pid);
@@ -201,9 +174,8 @@ impl ProcReader {
         let tgid = status.tgid;
         let tid = status.pid;
 
-        // Get priority from stat (only extract nice value)
-        let nice = self.read_nice()?;
-        let priority_str = format!("be/{}", (20 - nice) / 5);
+        // Get priority from ioprio syscall
+        let priority_str = super::ioprio::get_ioprio_string(tid);
 
         // Get cmdline (use TGID for main process cmdline)
         let cmdline_content = self.cmdline(pid)?;
