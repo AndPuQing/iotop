@@ -388,6 +388,57 @@ fn render_header(
     f.render_widget(paragraph, area);
 }
 
+const COMMON_HEADERS: [(&str, Alignment); 5] = [
+    ("TID:", Alignment::Right),
+    ("PRIO:", Alignment::Right),
+    ("USER:", Alignment::Left),
+    ("DISK READ:", Alignment::Right),
+    ("DISK WRITE:", Alignment::Right),
+];
+
+const DELAY_ACCT_HEADERS: [(&str, Alignment); 2] =
+    [("SWAPIN:", Alignment::Right), ("IO:", Alignment::Right)];
+
+const COMMAND_HEADER: (&str, Alignment) = ("COMMAND:", Alignment::Left);
+
+const COMMON_WIDTHS: [Constraint; 5] = [
+    Constraint::Length(8),  // TID
+    Constraint::Length(7),  // PRIO
+    Constraint::Length(9),  // USER
+    Constraint::Length(14), // DISK READ
+    Constraint::Length(14), // DISK WRITE
+];
+
+const DELAY_ACCT_WIDTHS: [Constraint; 2] = [
+    Constraint::Length(9), // SWAPIN
+    Constraint::Length(5), // IO
+];
+
+const COMMAND_WIDTH: Constraint = Constraint::Min(20);
+
+const COLOR_HIGHLIGHT: Color = Color::Rgb(100, 180, 255);
+
+fn create_toggle_title(hotkey: char, label: &'static str, is_active: bool) -> Line<'static> {
+    let base_style = Style::default().fg(COLOR_HIGHLIGHT);
+    let active_style = base_style.bold();
+
+    Line::from(vec![
+        Span::raw("┐"),
+        if is_active {
+            Span::styled(hotkey.to_string(), active_style)
+        } else {
+            Span::styled(hotkey.to_string(), base_style)
+        },
+        if is_active {
+            Span::raw(label).bold()
+        } else {
+            Span::raw(label)
+        },
+        Span::raw("┌"),
+    ])
+    .left_aligned()
+}
+
 fn render_process_table(
     f: &mut Frame,
     area: Rect,
@@ -400,29 +451,26 @@ fn render_process_table(
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
 
-    let header_cells = if has_delay_acct {
-        vec![
-            Cell::from(Text::from("TID:").right_aligned()),
-            Cell::from(Text::from("PRIO:").right_aligned()),
-            Cell::from(Text::from("USER:").left_aligned()),
-            Cell::from(Text::from("DISK READ:").right_aligned()),
-            Cell::from(Text::from("DISK WRITE:").right_aligned()),
-            Cell::from(Text::from("SWAPIN:").right_aligned()),
-            Cell::from(Text::from("IO:").right_aligned()),
-            Cell::from(Text::from("COMMAND:").left_aligned()),
-        ]
-    } else {
-        vec![
-            Cell::from(Text::from("TID:").right_aligned()),
-            Cell::from(Text::from("PRIO:").right_aligned()),
-            Cell::from(Text::from("USER:").left_aligned()),
-            Cell::from(Text::from("DISK READ:").right_aligned()),
-            Cell::from(Text::from("DISK WRITE:").right_aligned()),
-            Cell::from(Text::from("COMMAND:").left_aligned()),
-        ]
-    };
+    let mut header_cells = Vec::with_capacity(8);
+    for (text, align) in &COMMON_HEADERS {
+        header_cells.push(Cell::from(Text::from(*text).alignment(*align)));
+    }
+    if has_delay_acct {
+        for (text, align) in &DELAY_ACCT_HEADERS {
+            header_cells.push(Cell::from(Text::from(*text).alignment(*align)));
+        }
+    }
+    header_cells.push(Cell::from(
+        Text::from(COMMAND_HEADER.0).alignment(COMMAND_HEADER.1),
+    ));
 
     let header = Row::new(header_cells).style(header_style).height(1);
+
+    const COLOR_READ: Color = Color::Rgb(100, 180, 255); // Soft blue
+    const COLOR_WRITE: Color = Color::Rgb(255, 140, 140); // Soft red/pink
+    const COLOR_IO: Color = Color::Rgb(180, 140, 255); // Soft purple
+    const COLOR_ACTIVE: Color = Color::White;
+    const COLOR_INACTIVE: Color = Color::Gray;
 
     let rows = processes.iter().map(|process| {
         let stats = if state.accumulated {
@@ -447,129 +495,62 @@ fn render_process_table(
         };
 
         let row_style = if process.did_some_io(state.accumulated) {
-            Style::default().fg(Color::White)
+            Style::default().fg(COLOR_ACTIVE)
         } else {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(COLOR_INACTIVE)
         };
 
-        if has_delay_acct {
-            let io_delay = format_delay_percent(stats.blkio_delay_total, duration);
-            let swapin_delay = format_delay_percent(stats.swapin_delay_total, duration);
+        let mut cells = vec![
+            Cell::from(Text::from(process.tid.to_string()).alignment(Alignment::Right)),
+            Cell::from(Text::from(process.get_prio().to_string()).alignment(Alignment::Right)),
+            Cell::from(Text::from(process.get_user()).alignment(Alignment::Left)),
+            Cell::from(Text::from(read_str).alignment(Alignment::Right))
+                .style(Style::default().fg(COLOR_READ)),
+            Cell::from(Text::from(write_str).alignment(Alignment::Right))
+                .style(Style::default().fg(COLOR_WRITE)),
+        ];
 
-            Row::new(vec![
-                Cell::from(Text::from(process.tid.to_string()).alignment(Alignment::Right)),
-                Cell::from(Text::from(process.get_prio().to_string()).alignment(Alignment::Right)),
-                Cell::from(Text::from(process.get_user()).alignment(Alignment::Left)),
-                Cell::from(Text::from(read_str).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Rgb(100, 180, 255))), // Soft blue
-                Cell::from(Text::from(write_str).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Rgb(255, 140, 140))), // Soft red/pink
-                Cell::from(Text::from(swapin_delay).alignment(Alignment::Right)),
+        if has_delay_acct {
+            let swapin_delay = format_delay_percent(stats.swapin_delay_total, duration);
+            let io_delay = format_delay_percent(stats.blkio_delay_total, duration);
+            cells.push(Cell::from(
+                Text::from(swapin_delay).alignment(Alignment::Right),
+            ));
+            cells.push(
                 Cell::from(Text::from(io_delay).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Rgb(180, 140, 255))), // Soft purple
-                Cell::from(Text::from(process.get_cmdline()).alignment(Alignment::Left)),
-            ])
-            .style(row_style)
-        } else {
-            Row::new(vec![
-                Cell::from(Text::from(process.tid.to_string()).alignment(Alignment::Right)),
-                Cell::from(Text::from(process.get_prio().to_string()).alignment(Alignment::Right)),
-                Cell::from(Text::from(process.get_user()).alignment(Alignment::Left)),
-                Cell::from(Text::from(read_str).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Rgb(100, 180, 255))), // Soft blue
-                Cell::from(Text::from(write_str).alignment(Alignment::Right))
-                    .style(Style::default().fg(Color::Rgb(255, 140, 140))), // Soft red/pink
-                Cell::from(Text::from(process.get_cmdline()).alignment(Alignment::Left)),
-            ])
-            .style(row_style)
+                    .style(Style::default().fg(COLOR_IO)),
+            );
         }
+
+        cells.push(Cell::from(
+            Text::from(process.get_cmdline()).alignment(Alignment::Left),
+        ));
+
+        Row::new(cells).style(row_style)
     });
 
-    let widths = if has_delay_acct {
-        vec![
-            Constraint::Length(8),  // TID
-            Constraint::Length(7),  // PRIO (needs space for "PRIO ▼")
-            Constraint::Length(9),  // USER
-            Constraint::Length(14), // DISK READ (needs space for "DISK READ ▼")
-            Constraint::Length(14), // DISK WRITE (needs space for "DISK WRITE ▼")
-            Constraint::Length(9),  // SWAPIN (needs space for "SWAPIN ▼")
-            Constraint::Length(5),  // IO (needs space for "IO ▼")
-            Constraint::Min(20),    // COMMAND
-        ]
-    } else {
-        vec![
-            Constraint::Length(8),  // TID
-            Constraint::Length(7),  // PRIO (needs space for "PRIO ▼")
-            Constraint::Length(9),  // USER
-            Constraint::Length(14), // DISK READ (needs space for "DISK READ ▼")
-            Constraint::Length(14), // DISK WRITE (needs space for "DISK WRITE ▼")
-            Constraint::Min(20),    // COMMAND
-        ]
-    };
+    let mut widths = Vec::with_capacity(8);
+    widths.extend_from_slice(&COMMON_WIDTHS);
+    if has_delay_acct {
+        widths.extend_from_slice(&DELAY_ACCT_WIDTHS);
+    }
+    widths.push(COMMAND_WIDTH);
 
     let sort_row = state.sort_column.as_str();
 
     let block = Block::default()
+        .title_top(create_toggle_title('o', "nly-active", state.only_active))
+        .title_top(create_toggle_title('a', "ccumulated", state.accumulated))
+        .title_top(create_toggle_title('r', "everse", !state.sort_reverse))
         .title_top(
             Line::from(vec![
                 Span::raw("┐"),
-                if state.only_active {
-                    Span::styled("o", Style::default().fg(Color::Rgb(100, 180, 255)).bold())
-                } else {
-                    Span::styled("o", Style::default().fg(Color::Rgb(100, 180, 255)))
-                },
-                if state.only_active {
-                    Span::raw("nly-active").bold()
-                } else {
-                    Span::raw("nly-active")
-                },
-                Span::raw("┌"),
-            ])
-            .right_aligned(),
-        )
-        .title_top(
-            Line::from(vec![
-                Span::raw("┐"),
-                if state.accumulated {
-                    Span::styled("a", Style::default().fg(Color::Rgb(100, 180, 255)).bold())
-                } else {
-                    Span::styled("a", Style::default().fg(Color::Rgb(100, 180, 255)))
-                },
-                if state.accumulated {
-                    Span::raw("ccumulated").bold()
-                } else {
-                    Span::raw("ccumulated")
-                },
-                Span::raw("┌"),
-            ])
-            .right_aligned(),
-        )
-        .title_top(
-            Line::from(vec![
-                Span::raw("┐"),
-                if !state.sort_reverse {
-                    Span::styled("r", Style::default().fg(Color::Rgb(100, 180, 255)).bold())
-                } else {
-                    Span::styled("r", Style::default().fg(Color::Rgb(100, 180, 255)))
-                },
-                if !state.sort_reverse {
-                    Span::raw("everse").bold()
-                } else {
-                    Span::raw("everse")
-                },
-                Span::raw("┌"),
-            ])
-            .right_aligned(),
-        )
-        .title_top(
-            Line::from(vec![
-                Span::raw("┐"),
-                Span::styled("← ", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
+                Span::styled("← ", Style::default().fg(COLOR_HIGHLIGHT).bold()),
                 Span::raw(sort_row).bold(),
-                Span::styled(" →", Style::default().fg(Color::Rgb(100, 180, 255)).bold()),
+                Span::styled(" →", Style::default().fg(COLOR_HIGHLIGHT).bold()),
                 Span::raw("┌"),
             ])
-            .right_aligned(),
+            .left_aligned(),
         )
         .bg(Color::Black)
         .borders(Borders::ALL)

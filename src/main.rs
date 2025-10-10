@@ -264,8 +264,13 @@ fn sort_processes(processes: &mut Vec<&process::ProcessInfo>, state: &UIState) {
 
         if state.sort_reverse {
             ordering
+                .then_with(|| a.pid.cmp(&b.pid))
+                .then_with(|| a.tid.cmp(&b.tid))
         } else {
-            ordering.reverse()
+            ordering
+                .reverse()
+                .then_with(|| a.pid.cmp(&b.pid))
+                .then_with(|| a.tid.cmp(&b.tid))
         }
     });
 }
