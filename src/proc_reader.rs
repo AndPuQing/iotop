@@ -90,8 +90,8 @@ impl ProcStatus {
             if let Some((key, value)) = line.split_once(':') {
                 match key.trim() {
                     "Name" => name = value.trim().to_string(),
-                    "Tgid" => tgid = value.trim().split_whitespace().next()?.parse().ok()?,
-                    "Pid" => pid = value.trim().split_whitespace().next()?.parse().ok()?,
+                    "Tgid" => tgid = value.split_whitespace().next()?.parse().ok()?,
+                    "Pid" => pid = value.split_whitespace().next()?.parse().ok()?,
                     _ => {}
                 }
             }
