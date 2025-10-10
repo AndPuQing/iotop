@@ -328,7 +328,7 @@ fn render_ui(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // Header with time and I/O stats
+            Constraint::Length(4), // Header with time and I/O stats
             Constraint::Min(5),    // Process table
         ])
         .split(size);
@@ -350,17 +350,7 @@ fn render_header(
     let actual_read_str = format_bandwidth(actual_io.0, duration);
     let actual_write_str = format_bandwidth(actual_io.1, duration);
 
-    // Get current time
-    let current_time = chrono::Local::now().format("%H:%M:%S").to_string();
-
     let text = vec![
-        Line::from(vec![
-            Span::styled("Current Time: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                current_time,
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            ),
-        ]),
         Line::from(vec![
             Span::styled("Total DISK READ: ", Style::default().fg(Color::White)),
             Span::styled(
@@ -390,6 +380,17 @@ fn render_header(
     ];
 
     let block = Block::default()
+        .title_top(
+            Line::from(vec![
+                Span::raw("┐"),
+                Span::styled(
+                    format!("{}", chrono::Local::now().format("%H:%M:%S")),
+                    Style::default().fg(Color::White).bold(),
+                ),
+                Span::raw("┌"),
+            ])
+            .centered(),
+        )
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Gray))
