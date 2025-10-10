@@ -1,3 +1,4 @@
+mod proc_reader;
 mod process;
 mod taskstats;
 mod ui;
@@ -244,8 +245,8 @@ fn sort_processes(processes: &mut Vec<&process::ProcessInfo>, state: &UIState) {
 
         let ordering = match state.sort_column {
             SortColumn::Pid => a.tid.cmp(&b.tid),
-            SortColumn::Prio => a.get_prio().cmp(&b.get_prio()),
-            SortColumn::User => a.get_user().cmp(&b.get_user()),
+            SortColumn::Prio => a.get_prio().cmp(b.get_prio()),
+            SortColumn::User => a.get_user().cmp(b.get_user()),
             SortColumn::Read => stats_b.read_bytes.cmp(&stats_a.read_bytes),
             SortColumn::Write => {
                 let write_a = stats_a
@@ -259,7 +260,7 @@ fn sort_processes(processes: &mut Vec<&process::ProcessInfo>, state: &UIState) {
             SortColumn::Swapin => stats_b.swapin_delay_total.cmp(&stats_a.swapin_delay_total),
             SortColumn::Io => stats_b.blkio_delay_total.cmp(&stats_a.blkio_delay_total),
 
-            SortColumn::Command => a.get_cmdline().cmp(&b.get_cmdline()),
+            SortColumn::Command => a.get_cmdline().cmp(b.get_cmdline()),
         };
 
         if state.sort_reverse {

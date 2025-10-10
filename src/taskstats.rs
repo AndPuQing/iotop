@@ -97,9 +97,8 @@ impl TaskStatsConnection {
     pub fn get_task_stats(&mut self, pid: i32) -> Result<Option<TaskStats>> {
         match self.client.pid_stats(pid as u32) {
             Ok(stats) => Ok(Some(TaskStats::from_kernel_stats(&stats))),
-            Err(e) => {
+            Err(_) => {
                 // Process not found or access denied - just return None
-                println!("Failed to get task stats for PID {}: {}", pid, e);
                 Ok(None)
             }
         }
