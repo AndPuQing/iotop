@@ -6,6 +6,7 @@ mod ui;
 use anyhow::Result;
 use argh::FromArgs;
 use crossterm::event::{KeyCode, KeyModifiers};
+use nix::unistd::User;
 use process::{ProcessList, ProcessSnapshot};
 use taskstats::{TaskStats, TaskStatsConnection};
 use tokio_util::sync::CancellationToken;
@@ -37,6 +38,26 @@ struct Args {
     /// batch mode (non-interactive)
     #[argh(switch, short = 'b')]
     batch: bool,
+
+    /// processes/threads to monitor (can be repeated)
+    #[argh(option, short = 'p')]
+    pid: Vec<i32>,
+
+    /// users to monitor (username or UID, can be repeated)
+    #[argh(option, short = 'u')]
+    user: Vec<String>,
+
+    /// add timestamp on each line (implies --batch)
+    #[argh(switch, short = 't')]
+    time: bool,
+
+    /// suppress column names and headers (implies --batch)
+    #[argh(switch, short = 'q')]
+    quiet: bool,
+
+    /// use kilobytes instead of human-friendly units
+    #[argh(switch, short = 'k')]
+    kilobytes: bool,
 }
 
 #[tokio::main]
@@ -46,11 +67,16 @@ async fn main() -> Result<()> {
     // Check for requirements
     check_requirements()?;
 
+    // Resolve usernames to UIDs
+    let uids = resolve_users(&args.user)?;
+
     // Connect to taskstats
     let taskstats_conn = TaskStatsConnection::new()?;
-    let mut process_list = ProcessList::new(taskstats_conn);
+    let mut process_list = ProcessList::new(taskstats_conn)
+        .with_pids(args.pid.clone())
+        .with_uids(uids.clone());
 
-    if args.batch {
+    if args.batch || args.time || args.quiet {
         run_batch_mode(&mut process_list, &args)?;
     } else {
         run_interactive_mode(&mut process_list, &args).await?;
@@ -81,6 +107,27 @@ fn check_requirements() -> Result<()> {
     Ok(())
 }
 
+fn resolve_users(users: &[String]) -> Result<Vec<u32>> {
+    let mut uids = Vec::new();
+
+    for user_str in users {
+        // Try parsing as UID first
+        if let Ok(uid) = user_str.parse::<u32>() {
+            uids.push(uid);
+        } else {
+            // Try resolving as username
+            match User::from_name(user_str)? {
+                Some(user) => uids.push(user.uid.as_raw()),
+                None => {
+                    anyhow::bail!("Unknown user: {}", user_str);
+                }
+            }
+        }
+    }
+
+    Ok(uids)
+}
+
 async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
     let mut tui = Tui::new()?;
     tui.enter()?;
@@ -92,13 +139,16 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
     // Apply command line arguments to initial state
     state.only_active = args.only;
     state.accumulated = args.accumulated;
+    state.show_processes = args.processes;
 
     // Start async data stream
-    let data_cancel_token = CancellationToken::new();
+    let mut data_cancel_token = CancellationToken::new();
     let mut data_stream = ProcessList::spawn_refresh_stream(
         1.0 / args.delay,
-        args.processes,
+        state.show_processes,
         process_list.taskstats_conn.clone(),
+        args.pid.clone(),
+        process_list.uids.clone(),
         data_cancel_token.clone(),
     );
 
@@ -190,6 +240,24 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                         KeyCode::Char(' ') => {
                             state.paused = !state.paused;
                         }
+                        KeyCode::Char('p') | KeyCode::Char('P') => {
+                            // Toggle processes/threads mode
+                            state.show_processes = !state.show_processes;
+
+                            // Cancel current data stream
+                            data_cancel_token.cancel();
+
+                            // Start new data stream with updated mode
+                            data_cancel_token = CancellationToken::new();
+                            data_stream = ProcessList::spawn_refresh_stream(
+                                1.0 / args.delay,
+                                state.show_processes,
+                                process_list.taskstats_conn.clone(),
+                                args.pid.clone(),
+                                process_list.uids.clone(),
+                                data_cancel_token.clone(),
+                            );
+                        }
                         KeyCode::Left => {
                             state.sort_column = state.sort_column.cycle_backward(has_delay_acct);
                         }
@@ -198,6 +266,13 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                         }
                         KeyCode::Up | KeyCode::Down => {
                             state.sort_reverse = !state.sort_reverse;
+                        }
+                        KeyCode::Home => {
+                            state.sort_column = SortColumn::available_columns(has_delay_acct)[0];
+                        }
+                        KeyCode::End => {
+                            let columns = SortColumn::available_columns(has_delay_acct);
+                            state.sort_column = columns[columns.len() - 1];
                         }
                         _ => {}
                     },
@@ -284,39 +359,52 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
     let mut iteration = 0;
 
     loop {
+        // Get timestamp if needed
+        let timestamp = if args.time {
+            chrono::Local::now().format("%H:%M:%S ").to_string()
+        } else {
+            String::new()
+        };
+
         // Refresh process data
         let (total, actual) = process_list.refresh_processes(args.processes)?;
 
-        // Print summary - handle broken pipe
-        if writeln!(
-            io::stdout(),
-            "Total DISK READ :   {:>14} | Total DISK WRITE :   {:>14}",
-            ui::format_bandwidth(total.0, process_list.duration),
-            ui::format_bandwidth(total.1, process_list.duration)
-        )
-        .is_err()
-        {
-            return Ok(());
+        // Print summary - handle broken pipe (unless -q)
+        if !args.quiet {
+            if writeln!(
+                io::stdout(),
+                "{}Total DISK READ :   {:>14} | Total DISK WRITE :   {:>14}",
+                timestamp,
+                ui::format_bandwidth(total.0, process_list.duration),
+                ui::format_bandwidth(total.1, process_list.duration)
+            )
+            .is_err()
+            {
+                return Ok(());
+            }
+
+            if writeln!(
+                io::stdout(),
+                "{}Actual DISK READ:   {:>14} | Actual DISK WRITE:   {:>14}",
+                timestamp,
+                ui::format_bandwidth(actual.0, process_list.duration),
+                ui::format_bandwidth(actual.1, process_list.duration)
+            )
+            .is_err()
+            {
+                return Ok(());
+            }
         }
 
-        if writeln!(
-            io::stdout(),
-            "Actual DISK READ:   {:>14} | Actual DISK WRITE:   {:>14}",
-            ui::format_bandwidth(actual.0, process_list.duration),
-            ui::format_bandwidth(actual.1, process_list.duration)
-        )
-        .is_err()
-        {
-            return Ok(());
-        }
-
-        // Print header on first iteration
-        if iteration == 0 {
+        // Print header on first iteration (unless -q)
+        if iteration == 0 && !args.quiet {
             let has_delay = TaskStats::has_delay_acct();
+            let header_prefix = if args.time { "    TIME " } else { "" };
             if has_delay {
                 if writeln!(
                     io::stdout(),
-                    "{:>7}  {:>4}  {:<8}     {:>10}  {:>11}  {:>6}      {:>2}    COMMAND",
+                    "{}{:>7}  {:>4}  {:<8}     {:>10}  {:>11}  {:>6}      {:>2}    COMMAND",
+                    header_prefix,
                     "TID",
                     "PRIO",
                     "USER",
@@ -331,7 +419,8 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
                 }
             } else if writeln!(
                 io::stdout(),
-                "{:>7}  {:>4}  {:<8}     {:>10}  {:>11} ?unavailable? COMMAND",
+                "{}{:>7}  {:>4}  {:<8}     {:>10}  {:>11} ?unavailable? COMMAND",
+                header_prefix,
                 "TID",
                 "PRIO",
                 "USER",
@@ -378,7 +467,13 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
                 &process.stats_delta
             };
 
-            let read_str = if args.accumulated {
+            let read_str = if args.kilobytes {
+                if args.accumulated {
+                    ui::format_size_kb(stats.read_bytes)
+                } else {
+                    ui::format_bandwidth_kb(stats.read_bytes, process_list.duration)
+                }
+            } else if args.accumulated {
                 ui::human_size(stats.read_bytes as i64)
             } else {
                 ui::format_bandwidth(stats.read_bytes, process_list.duration)
@@ -387,7 +482,13 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             let write_bytes = stats
                 .write_bytes
                 .saturating_sub(stats.cancelled_write_bytes);
-            let write_str = if args.accumulated {
+            let write_str = if args.kilobytes {
+                if args.accumulated {
+                    ui::format_size_kb(write_bytes)
+                } else {
+                    ui::format_bandwidth_kb(write_bytes, process_list.duration)
+                }
+            } else if args.accumulated {
                 ui::human_size(write_bytes as i64)
             } else {
                 ui::format_bandwidth(write_bytes, process_list.duration)
@@ -403,7 +504,8 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
 
                 if writeln!(
                     io::stdout(),
-                    "{:>7}  {:>4}  {:<8} {:>11} {:>11}  {:>6}      {:>2} {}",
+                    "{}{:>7}  {:>4}  {:<8} {:>11} {:>11}  {:>6}      {:>2} {}",
+                    timestamp,
                     process.tid,
                     process.get_prio(),
                     process.get_user(),
@@ -419,7 +521,8 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
                 }
             } else if writeln!(
                 io::stdout(),
-                "{:>7}  {:>4}  {:<8} {:>11} {:>11} ?unavailable? {}",
+                "{}{:>7}  {:>4}  {:<8} {:>11} {:>11} ?unavailable? {}",
+                timestamp,
                 process.tid,
                 process.get_prio(),
                 process.get_user(),

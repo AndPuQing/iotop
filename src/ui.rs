@@ -81,7 +81,7 @@ impl SortColumn {
 
 impl SortColumn {
     /// Get all available columns based on whether delay accounting is available
-    fn available_columns(has_delay_acct: bool) -> Vec<SortColumn> {
+    pub fn available_columns(has_delay_acct: bool) -> Vec<SortColumn> {
         if has_delay_acct {
             vec![
                 SortColumn::Pid,
@@ -146,6 +146,7 @@ pub struct UIState {
     pub sort_column: SortColumn,
     pub sort_reverse: bool,
     pub paused: bool,
+    pub show_processes: bool,
 }
 
 impl Default for UIState {
@@ -156,6 +157,7 @@ impl Default for UIState {
             sort_column: SortColumn::Pid,
             sort_reverse: true,
             paused: false,
+            show_processes: false,
         }
     }
 }
@@ -326,7 +328,7 @@ fn render_ui(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4), // Header with I/O stats
+            Constraint::Length(5), // Header with time and I/O stats
             Constraint::Min(5),    // Process table
         ])
         .split(size);
@@ -348,31 +350,41 @@ fn render_header(
     let actual_read_str = format_bandwidth(actual_io.0, duration);
     let actual_write_str = format_bandwidth(actual_io.1, duration);
 
+    // Get current time
+    let current_time = chrono::Local::now().format("%H:%M:%S").to_string();
+
     let text = vec![
+        Line::from(vec![
+            Span::styled("Current Time: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                current_time,
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]),
         Line::from(vec![
             Span::styled("Total DISK READ: ", Style::default().fg(Color::White)),
             Span::styled(
                 format!("{:>12}", total_read_str),
-                Style::default().fg(Color::White), // Soft blue
+                Style::default().fg(Color::White),
             ),
             Span::raw("  │  "),
             Span::styled("Total DISK WRITE: ", Style::default().fg(Color::White)),
             Span::styled(
                 format!("{:>12}", total_write_str),
-                Style::default().fg(Color::White), // Soft red/pink
+                Style::default().fg(Color::White),
             ),
         ]),
         Line::from(vec![
             Span::styled("Actual DISK READ: ", Style::default().fg(Color::White)),
             Span::styled(
                 format!("{:>11}", actual_read_str),
-                Style::default().fg(Color::White), // Soft blue
+                Style::default().fg(Color::White),
             ),
             Span::raw("  │  "),
             Span::styled("Actual DISK WRITE: ", Style::default().fg(Color::White)),
             Span::styled(
                 format!("{:>11}", actual_write_str),
-                Style::default().fg(Color::White), // Soft red/pink
+                Style::default().fg(Color::White),
             ),
         ]),
     ];
@@ -380,8 +392,8 @@ fn render_header(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Gray)) // Gray borders
-        .bg(Color::Black) // Dark background
+        .border_style(Style::default().fg(Color::Gray))
+        .bg(Color::Black)
         .title(" iotop - I/O Monitor ");
 
     let paragraph = Paragraph::new(text).block(block);
@@ -539,8 +551,9 @@ fn render_process_table(
     let sort_row = state.sort_column.as_str();
 
     let block = Block::default()
-        .title_top(create_toggle_title('o', "nly-active", state.only_active))
         .title_top(create_toggle_title('a', "ccumulated", state.accumulated))
+        .title_top(create_toggle_title('o', "nly-active", state.only_active))
+        .title_top(create_toggle_title('p', "rocesses", state.show_processes))
         .title_top(create_toggle_title('r', "everse", !state.sort_reverse))
         .title_top(
             Line::from(vec![
@@ -572,6 +585,19 @@ pub fn format_bandwidth(bytes: u64, duration: f64) -> String {
     }
     let bytes_per_sec = bytes as f64 / duration;
     human_size(bytes_per_sec as i64) + "/s"
+}
+
+pub fn format_bandwidth_kb(bytes: u64, duration: f64) -> String {
+    if duration <= 0.0 {
+        return "0.00 K/s".to_string();
+    }
+    let kb_per_sec = (bytes as f64 / duration) / 1024.0;
+    format!("{:.2} K/s", kb_per_sec)
+}
+
+pub fn format_size_kb(bytes: u64) -> String {
+    let kb = bytes as f64 / 1024.0;
+    format!("{:.2} K", kb)
 }
 
 pub fn human_size(bytes: i64) -> String {

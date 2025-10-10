@@ -163,6 +163,8 @@ pub struct ProcessList {
     pub duration: f64,
     pub prev_pgpgin: Option<u64>,
     pub prev_pgpgout: Option<u64>,
+    pub pids: Vec<i32>,
+    pub uids: Vec<u32>,
 }
 
 impl ProcessList {
@@ -174,13 +176,27 @@ impl ProcessList {
             duration: 0.0,
             prev_pgpgin: None,
             prev_pgpgout: None,
+            pids: Vec::new(),
+            uids: Vec::new(),
         }
+    }
+
+    pub fn with_pids(mut self, pids: Vec<i32>) -> Self {
+        self.pids = pids;
+        self
+    }
+
+    pub fn with_uids(mut self, uids: Vec<u32>) -> Self {
+        self.uids = uids;
+        self
     }
 
     pub fn spawn_refresh_stream(
         update_rate: f64,
         show_processes: bool,
         taskstats_conn: Arc<Mutex<TaskStatsConnection>>,
+        pids: Vec<i32>,
+        uids: Vec<u32>,
         cancellation_token: CancellationToken,
     ) -> mpsc::UnboundedReceiver<ProcessSnapshot> {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -202,6 +218,8 @@ impl ProcessList {
                         // Refresh process data in blocking task to avoid blocking async runtime
                         let taskstats_conn_clone = taskstats_conn.clone();
                         let processes_clone = processes.clone();
+                        let pids_clone = pids.clone();
+                        let uids_clone = uids.clone();
 
                         let result = task::spawn_blocking(move || {
                             let mut temp_list = ProcessList {
@@ -211,6 +229,8 @@ impl ProcessList {
                                 duration,
                                 prev_pgpgin,
                                 prev_pgpgout,
+                                pids: pids_clone,
+                                uids: uids_clone,
                             };
 
                             let io_stats = temp_list.refresh_processes(show_processes)?;
@@ -309,6 +329,26 @@ impl ProcessList {
         (0, 0)
     }
 
+    fn should_monitor(&self, id: i32) -> bool {
+        if self.pids.is_empty() {
+            true
+        } else {
+            self.pids.contains(&id)
+        }
+    }
+
+    fn should_monitor_uid(&self, process: &ProcessInfo) -> bool {
+        if self.uids.is_empty() {
+            true
+        } else if let Some(uid) = process.uid {
+            self.uids.contains(&uid)
+        } else {
+            // If we don't know the UID yet, allow it for now
+            // It will be filtered on next refresh after metadata is loaded
+            true
+        }
+    }
+
     pub fn refresh_processes(&mut self, show_processes: bool) -> Result<((u64, u64), (u64, u64))> {
         let new_timestamp = Instant::now();
         self.duration = new_timestamp.duration_since(self.timestamp).as_secs_f64();
@@ -332,48 +372,75 @@ impl ProcessList {
         // When show_processes=false (default): List all TIDs individually
         if show_processes {
             // Process mode (-P flag): Aggregate threads by TGID
-            for entry in fs::read_dir("/proc")?.flatten() {
-                if let Ok(file_name) = entry.file_name().into_string() {
-                    if let Ok(tgid) = file_name.parse::<i32>() {
-                        let process = self
-                            .processes
-                            .entry(tgid)
-                            .or_insert_with(|| ProcessInfo::new(tgid));
-                        process.tid = tgid;
-
-                        // Get all threads for this process
-                        let task_dir = format!("/proc/{}/task", tgid);
-                        let tids: Vec<i32> = fs::read_dir(task_dir)
+            let tgids: Vec<i32> = if !self.pids.is_empty() {
+                // If PIDs specified, only monitor those
+                self.pids.clone()
+            } else {
+                // Otherwise, scan all processes
+                fs::read_dir("/proc")?
+                    .flatten()
+                    .filter_map(|entry| {
+                        entry
+                            .file_name()
+                            .into_string()
                             .ok()
-                            .map(|entries| {
-                                entries
-                                    .flatten()
-                                    .filter_map(|e| {
-                                        e.file_name()
-                                            .into_string()
-                                            .ok()
-                                            .and_then(|s| s.parse::<i32>().ok())
-                                    })
-                                    .collect()
+                            .and_then(|s| s.parse::<i32>().ok())
+                    })
+                    .collect()
+            };
+
+            for tgid in &tgids {
+                // Get or create process entry
+                let process = self
+                    .processes
+                    .entry(*tgid)
+                    .or_insert_with(|| ProcessInfo::new(*tgid));
+                process.tid = *tgid;
+
+                // Update metadata first so we can check UID
+                Self::update_process_metadata(process, *tgid);
+            }
+
+            // Now filter by UID after metadata is loaded
+            let tgids_to_process: Vec<i32> = self
+                .processes
+                .iter()
+                .filter(|(tgid, process)| tgids.contains(tgid) && self.should_monitor_uid(process))
+                .map(|(tgid, _)| *tgid)
+                .collect();
+
+            for tgid in tgids_to_process {
+                let process = self.processes.get_mut(&tgid).unwrap();
+
+                // Get all threads for this process
+                let task_dir = format!("/proc/{}/task", tgid);
+                let tids: Vec<i32> = fs::read_dir(task_dir)
+                    .ok()
+                    .map(|entries| {
+                        entries
+                            .flatten()
+                            .filter_map(|e| {
+                                e.file_name()
+                                    .into_string()
+                                    .ok()
+                                    .and_then(|s| s.parse::<i32>().ok())
                             })
-                            .unwrap_or_else(|| vec![tgid]);
+                            .collect()
+                    })
+                    .unwrap_or_else(|| vec![tgid]);
 
-                        for tid in tids {
-                            let thread = process
-                                .threads
-                                .entry(tid)
-                                .or_insert_with(|| ThreadInfo::new(tid));
+                for tid in tids {
+                    let thread = process
+                        .threads
+                        .entry(tid)
+                        .or_insert_with(|| ThreadInfo::new(tid));
 
-                            let (read, write) =
-                                Self::collect_thread_stats(thread, &self.taskstats_conn);
-                            total_read += read;
-                            total_write += write;
-                        }
-
-                        process.update_stats();
-                        Self::update_process_metadata(process, tgid);
-                    }
+                    let (read, write) = Self::collect_thread_stats(thread, &self.taskstats_conn);
+                    total_read += read;
+                    total_write += write;
                 }
+
+                process.update_stats();
             }
         } else {
             // Thread mode (default): Each thread is a separate entry
@@ -386,12 +453,38 @@ impl ProcessList {
                             for task_entry in task_entries.flatten() {
                                 if let Ok(tid_name) = task_entry.file_name().into_string() {
                                     if let Ok(tid) = tid_name.parse::<i32>() {
-                                        // Key by TID, not TGID!
-                                        let process = self
-                                            .processes
-                                            .entry(tid)
-                                            .or_insert_with(|| ProcessInfo::new(tgid));
-                                        process.tid = tid;
+                                        // Filter by TID if PIDs specified
+                                        if !self.should_monitor(tid) {
+                                            continue;
+                                        }
+
+                                        // First, check if entry exists and update metadata
+                                        let should_skip = {
+                                            let process = self
+                                                .processes
+                                                .entry(tid)
+                                                .or_insert_with(|| ProcessInfo::new(tgid));
+                                            process.tid = tid;
+
+                                            // Update metadata first to get UID
+                                            Self::update_process_metadata(process, tid);
+
+                                            // Check if we should filter by UID
+                                            if self.uids.is_empty() {
+                                                false
+                                            } else if let Some(uid) = process.uid {
+                                                !self.uids.contains(&uid)
+                                            } else {
+                                                false
+                                            }
+                                        };
+
+                                        if should_skip {
+                                            continue;
+                                        }
+
+                                        // Now get mutable reference again for thread processing
+                                        let process = self.processes.get_mut(&tid).unwrap();
 
                                         // Add just this one thread
                                         let thread = process
@@ -407,7 +500,6 @@ impl ProcessList {
                                         total_write += write;
 
                                         process.update_stats();
-                                        Self::update_process_metadata(process, tid);
                                     }
                                 }
                             }
