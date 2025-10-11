@@ -44,7 +44,7 @@ tokio = { version = "1", default-features = false, features = [
 tokio-util = { version = "0.7", default-features = false }
 futures = { version = "0.3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-linux-taskstats = { path = "patches/linux-taskstats", default-features = false }
+linux-taskstats = { path = "patches/linux-taskstats", default-features = false, version = "0.7" }
 
 [profile.release]
 codegen-units = 1
