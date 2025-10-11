@@ -1,17 +1,23 @@
 use anyhow::Result;
 use crossterm::{
     cursor,
-    event::{Event as CrosstermEvent, EventStream, KeyEvent, KeyEventKind, MouseEvent},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, EventStream, KeyEvent,
+        KeyEventKind, MouseEvent,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::{FutureExt, StreamExt};
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
+    widgets::{
+        Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Table,
+    },
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
@@ -147,6 +153,7 @@ pub struct UIState {
     pub sort_reverse: bool,
     pub paused: bool,
     pub show_processes: bool,
+    pub scroll_offset: usize,
 }
 
 impl Default for UIState {
@@ -158,6 +165,7 @@ impl Default for UIState {
             sort_reverse: true,
             paused: false,
             show_processes: false,
+            scroll_offset: 0,
         }
     }
 }
@@ -247,7 +255,12 @@ impl Tui {
 
     pub fn enter(&mut self) -> Result<()> {
         enable_raw_mode()?;
-        execute!(io::stdout(), EnterAlternateScreen, cursor::Hide)?;
+        execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            cursor::Hide,
+            EnableMouseCapture
+        )?;
         self.start();
         Ok(())
     }
@@ -256,7 +269,12 @@ impl Tui {
         self.stop()?;
         if crossterm::terminal::is_raw_mode_enabled()? {
             self.terminal.flush()?;
-            execute!(io::stdout(), LeaveAlternateScreen, cursor::Show)?;
+            execute!(
+                io::stdout(),
+                LeaveAlternateScreen,
+                cursor::Show,
+                DisableMouseCapture
+            )?;
             disable_raw_mode()?;
         }
         Ok(())
@@ -276,7 +294,7 @@ impl Tui {
         total_io: (u64, u64),
         actual_io: (u64, u64),
         duration: f64,
-        state: &UIState,
+        state: &mut UIState,
         has_delay_acct: bool,
     ) -> Result<()> {
         self.terminal.draw(|f| {
@@ -320,7 +338,7 @@ fn render_ui(
     total_io: (u64, u64),
     actual_io: (u64, u64),
     duration: f64,
-    state: &UIState,
+    state: &mut UIState,
     has_delay_acct: bool,
 ) {
     let size = f.area();
@@ -457,7 +475,7 @@ fn render_process_table(
     area: Rect,
     processes: &[&ProcessInfo],
     duration: f64,
-    state: &UIState,
+    state: &mut UIState,
     has_delay_acct: bool,
 ) {
     let header_style = Style::default()
@@ -479,13 +497,26 @@ fn render_process_table(
 
     let header = Row::new(header_cells).style(header_style).height(1);
 
+    let available_height = area.height.saturating_sub(3) as usize;
+    let total_processes = processes.len();
+
+    if total_processes > 0 {
+        let max_scroll = total_processes.saturating_sub(available_height);
+        state.scroll_offset = state.scroll_offset.min(max_scroll);
+    } else {
+        state.scroll_offset = 0;
+    }
+
+    let end = (state.scroll_offset + available_height).min(total_processes);
+    let visible_processes = &processes[state.scroll_offset..end];
+
     const COLOR_READ: Color = Color::Rgb(100, 180, 255); // Soft blue
     const COLOR_WRITE: Color = Color::Rgb(255, 140, 140); // Soft red/pink
     const COLOR_IO: Color = Color::Rgb(180, 140, 255); // Soft purple
     const COLOR_ACTIVE: Color = Color::White;
     const COLOR_INACTIVE: Color = Color::Gray;
 
-    let rows = processes.iter().map(|process| {
+    let rows = visible_processes.iter().map(|process| {
         let stats = if state.accumulated {
             &process.stats_accum
         } else {
@@ -551,7 +582,23 @@ fn render_process_table(
 
     let sort_row = state.sort_column.as_str();
 
-    let block = Block::default()
+    let scroll_indicator = if total_processes > available_height {
+        let start_row = state.scroll_offset + 1;
+        let end_row = end.min(total_processes);
+        let percentage = if total_processes > 0 {
+            ((state.scroll_offset as f64 / total_processes as f64) * 100.0) as usize
+        } else {
+            0
+        };
+        format!(
+            "{}-{}/{} ({}%)",
+            start_row, end_row, total_processes, percentage
+        )
+    } else {
+        String::new()
+    };
+
+    let mut block = Block::default()
         .title_top(create_toggle_title('a', "ccumulated", state.accumulated))
         .title_top(create_toggle_title('o', "nly-active", state.only_active))
         .title_top(create_toggle_title('p', "rocesses", state.show_processes))
@@ -571,6 +618,20 @@ fn render_process_table(
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Gray));
 
+    if !scroll_indicator.is_empty() {
+        block = block.title_top(
+            Line::from(vec![
+                Span::raw("┐"),
+                Span::styled(
+                    scroll_indicator,
+                    Style::default().fg(COLOR_HIGHLIGHT).bold(),
+                ),
+                Span::raw("┌"),
+            ])
+            .right_aligned(),
+        );
+    }
+
     let table = Table::default()
         .rows(rows)
         .header(header)
@@ -578,6 +639,28 @@ fn render_process_table(
         .block(block);
 
     f.render_widget(table, area);
+
+    if total_processes > available_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"))
+            .track_symbol(Some(" "))
+            .thumb_symbol("█")
+            .style(Style::default().fg(COLOR_HIGHLIGHT));
+
+        let mut scrollbar_state = ScrollbarState::new(total_processes / available_height)
+            .position(state.scroll_offset / available_height)
+            .viewport_content_length(1);
+
+        f.render_stateful_widget(
+            scrollbar,
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            }),
+            &mut scrollbar_state,
+        );
+    }
 }
 
 pub fn format_bandwidth(bytes: u64, duration: f64) -> String {

@@ -6,6 +6,7 @@ mod ui;
 
 use anyhow::Result;
 use argh::FromArgs;
+use crossterm::event::MouseEventKind;
 use crossterm::event::{KeyCode, KeyModifiers};
 use nix::unistd::User;
 use process::{ProcessList, ProcessSnapshot};
@@ -171,19 +172,16 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
             Some(event) = tui.next_event() => {
                 match event {
                     Event::Init => {
-                        // Initial render - wait for first data update
+
                     }
                     Event::DataUpdate(snapshot) => {
-                        // New data available - render it
                         let mut processes: Vec<&process::ProcessInfo> =
                             snapshot.processes.values().collect();
 
-                        // Filter if only active requested
                         if state.only_active {
                             processes.retain(|p| p.did_some_io(state.accumulated));
                         }
 
-                        // Sort processes based on current sort column
                         sort_processes(&mut processes, &state);
 
                         // Draw the UI
@@ -192,7 +190,7 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                             snapshot.total_io,
                             snapshot.actual_io,
                             snapshot.duration,
-                            &state,
+                            &mut state,
                             has_delay_acct,
                         )?;
 
@@ -205,7 +203,6 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                         }
                     }
                     Event::Render => {
-                        // Render event - redraw with current data
                         if let Some(ref snapshot) = current_snapshot {
                             let mut processes: Vec<&process::ProcessInfo> =
                                 snapshot.processes.values().collect();
@@ -221,7 +218,7 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                                 snapshot.total_io,
                                 snapshot.actual_io,
                                 snapshot.duration,
-                                &state,
+                                &mut state,
                                 has_delay_acct,
                             )?;
                         }
@@ -231,24 +228,24 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                         KeyCode::Char('o') | KeyCode::Char('O') => {
                             state.only_active = !state.only_active;
+                            state.scroll_offset = 0;
                         }
                         KeyCode::Char('a') | KeyCode::Char('A') => {
                             state.accumulated = !state.accumulated;
+                            state.scroll_offset = 0;
                         }
                         KeyCode::Char('r') | KeyCode::Char('R') => {
                             state.sort_reverse = !state.sort_reverse;
+                            state.scroll_offset = 0;
                         }
                         KeyCode::Char(' ') => {
                             state.paused = !state.paused;
                         }
                         KeyCode::Char('p') | KeyCode::Char('P') => {
-                            // Toggle processes/threads mode
                             state.show_processes = !state.show_processes;
+                            state.scroll_offset = 0;
 
-                            // Cancel current data stream
                             data_cancel_token.cancel();
-
-                            // Start new data stream with updated mode
                             data_cancel_token = CancellationToken::new();
                             data_stream = ProcessList::spawn_refresh_stream(
                                 1.0 / args.delay,
@@ -261,22 +258,53 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                         }
                         KeyCode::Left => {
                             state.sort_column = state.sort_column.cycle_backward(has_delay_acct);
+                            state.scroll_offset = 0;
                         }
                         KeyCode::Right => {
                             state.sort_column = state.sort_column.cycle_forward(has_delay_acct);
+                            state.scroll_offset = 0;
                         }
-                        KeyCode::Up | KeyCode::Down => {
-                            state.sort_reverse = !state.sort_reverse;
+                        KeyCode::Up => {
+                            state.scroll_offset = state.scroll_offset.saturating_sub(1);
+                        }
+                        KeyCode::Down => {
+                            state.scroll_offset = state.scroll_offset.saturating_add(1);
                         }
                         KeyCode::Home => {
-                            state.sort_column = SortColumn::available_columns(has_delay_acct)[0];
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                state.scroll_offset = 0;
+                            } else {
+                                state.sort_column = SortColumn::available_columns(has_delay_acct)[0];
+                            }
                         }
                         KeyCode::End => {
-                            let columns = SortColumn::available_columns(has_delay_acct);
-                            state.sort_column = columns[columns.len() - 1];
+                            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                state.scroll_offset = usize::MAX;
+                            } else {
+                                let columns = SortColumn::available_columns(has_delay_acct);
+                                state.sort_column = columns[columns.len() - 1];
+                            }
+                        }
+                        KeyCode::PageUp => {
+                            state.scroll_offset = state.scroll_offset.saturating_sub(10);
+                        }
+                        KeyCode::PageDown => {
+                            state.scroll_offset = state.scroll_offset.saturating_add(10);
                         }
                         _ => {}
                     },
+                    Event::Mouse(mouse) => {
+
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                state.scroll_offset = state.scroll_offset.saturating_sub(3);
+                            }
+                            MouseEventKind::ScrollDown => {
+                                state.scroll_offset = state.scroll_offset.saturating_add(3);
+                            }
+                            _ => {}
+                        }
+                    }
                     Event::Resize(_, _) => {
                         // Terminal was resized, redraw on next render
                     }
