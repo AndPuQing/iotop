@@ -10,7 +10,9 @@ A Rust implementation of iotop, a tool to monitor I/O usage of processes on Linu
 
 ## Snapshot
 
-![iotop](./assets/Snapshot.png)
+<div align="center">
+ <img src="https://github.com/AndPuQing/iotop/blob/main/assets/Snapshot.png?raw=true">
+</div>
 
 ## Installation
 
