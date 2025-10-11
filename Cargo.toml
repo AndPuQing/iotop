@@ -1,9 +1,17 @@
 [package]
 name = "iotop"
-description = "A Rust implementation of iotop"
+description = "A Rust implementation of iotop - display I/O usage of processes"
 license = "MIT"
 version = "0.1.8"
 edition = "2021"
+authors = ["PuQing <me@puqing.work>"]
+repository = "https://github.com/AndPuQing/iotop"
+homepage = "https://github.com/AndPuQing/iotop"
+documentation = "https://docs.rs/iotop"
+readme = "README.md"
+keywords = ["iotop", "io", "monitoring", "performance", "system"]
+categories = ["command-line-utilities", "os::linux-apis", "development-tools::profiling"]
+exclude = [".github/", ".claude/", "assets/"]
 
 [[bin]]
 name = "iotop"

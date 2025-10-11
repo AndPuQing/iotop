@@ -1,0 +1,238 @@
+.TH IOTOP 8 "October 2025" "iotop 0.1.8" "System Administration"
+.SH NAME
+iotop \- display I/O usage of processes
+.SH SYNOPSIS
+.B iotop
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B iotop
+is a tool to monitor I/O usage information output by the Linux kernel (requires 2.6.20 or later).
+It displays a table of current I/O usage by processes or threads on the system, showing the bandwidth
+of read and write operations for each process. The display is updated in real time and is similar
+in concept to the
+.BR top (1)
+command.
+.PP
+This is a Rust implementation of iotop, providing improved performance and reliability while
+maintaining compatibility with the original Python version.
+.PP
+.B iotop
+requires root privileges to access the kernel's taskstats interface via netlink.
+Alternatively, you can grant the CAP_NET_ADMIN capability to the binary:
+.PP
+.RS
+sudo setcap cap_net_admin+eip /path/to/iotop
+.RE
+.SH OPTIONS
+.TP
+.BR \-o ", " \-\-only
+Only show processes or threads actually doing I/O, instead of showing all processes or threads.
+This is useful to avoid cluttering the display with processes that are not performing any I/O operations.
+.TP
+.BR \-P ", " \-\-processes
+Only show processes. By default, iotop shows all threads. This option aggregates I/O by process,
+hiding individual threads.
+.TP
+.BR \-a ", " \-\-accumulated
+Show accumulated I/O instead of bandwidth. In this mode, the tool displays the total amount
+of I/O (reads and writes) done by each process since iotop started, instead of the current
+I/O bandwidth.
+.TP
+.BR \-d ", " \-\-delay " \fISECONDS\fR"
+Set the delay between iterations in seconds (accepts decimal values). Default is 1.0 second.
+Higher values result in less frequent updates but lower CPU usage.
+.TP
+.BR \-n ", " \-\-iter " \fINUMBER\fR"
+Set the number of iterations before quitting. By default, iotop runs indefinitely.
+This is useful for batch mode or collecting a specific number of samples.
+.TP
+.BR \-b ", " \-\-batch
+Run in batch mode (non-interactive). In this mode, iotop outputs text suitable for
+parsing or logging, rather than a full-screen interactive display. Output goes to stdout.
+Useful for scripting or redirecting to a file.
+.TP
+.BR \-p ", " \-\-pid " \fIPID\fR"
+Monitor only the specified process ID(s). This option can be repeated to monitor multiple processes.
+Threads of the specified process are also monitored.
+.TP
+.BR \-u ", " \-\-user " \fIUSERNAME\fR"
+Monitor only processes belonging to the specified user(s). The argument can be either a username
+or a numeric UID. This option can be repeated to monitor multiple users.
+.TP
+.BR \-t ", " \-\-time
+Add a timestamp on each line in batch mode (implies \fB\-\-batch\fR). The timestamp format is HH:MM:SS.
+.TP
+.BR \-q ", " \-\-quiet
+Suppress column names and summary statistics (implies \fB\-\-batch\fR). Only process lines are printed.
+Useful for minimal output in scripts.
+.TP
+.BR \-k ", " \-\-kilobytes
+Use kilobytes instead of human-friendly units. Displays all values in KB/s (bandwidth) or KB (accumulated).
+.TP
+.BR \-h ", " \-\-help
+Display help information and exit.
+.SH INTERACTIVE KEYS
+The following keys are recognized in interactive mode:
+.TP
+.BR q ", " Q
+Quit the program.
+.TP
+.BR Ctrl+C
+Quit the program.
+.TP
+.BR o ", " O
+Toggle showing only processes doing I/O (same as \fB\-\-only\fR).
+.TP
+.BR a ", " A
+Toggle between showing bandwidth and accumulated I/O (same as \fB\-\-accumulated\fR).
+.TP
+.BR p ", " P
+Toggle between showing all threads and only processes (same as \fB\-\-processes\fR).
+.TP
+.BR r ", " R
+Reverse the sorting order.
+.TP
+.BR Space
+Pause/resume updating the display.
+.TP
+.BR Left ", " Right
+Change the sorting column.
+.TP
+.BR Up ", " Down
+Scroll the process list up or down by one line.
+.TP
+.BR PageUp ", " PageDown
+Scroll the process list up or down by 10 lines.
+.TP
+.BR Home
+Jump to the first sorting column, or with Ctrl, scroll to the top of the list.
+.TP
+.BR End
+Jump to the last sorting column, or with Ctrl, scroll to the bottom of the list.
+.TP
+.BR Mouse " scroll"
+Scroll the process list up or down by 3 lines using the mouse wheel.
+.SH COLUMNS
+The following columns are displayed:
+.TP
+.B TID
+Thread ID (if showing threads) or Process ID (if showing processes with \fB\-P\fR).
+.TP
+.B PRIO
+I/O priority class and level. Format is class/level. Classes: rt (realtime), be (best-effort), idle.
+.TP
+.B USER
+Username of the process owner.
+.TP
+.B DISK READ
+Disk read bandwidth (in human-readable format or KB/s if \fB\-k\fR is used), or accumulated
+reads if \fB\-a\fR is specified.
+.TP
+.B DISK WRITE
+Disk write bandwidth (in human-readable format or KB/s if \fB\-k\fR is used), or accumulated
+writes if \fB\-a\fR is specified. This is the actual I/O written to disk, excluding writes
+that were cancelled (e.g., truncated files).
+.TP
+.B SWAPIN
+Percentage of time the process was waiting for swap-in (only available if CONFIG_TASK_DELAY_ACCT
+is enabled in the kernel).
+.TP
+.B IO
+Percentage of time the process was waiting for I/O (block I/O delays). Only available if
+CONFIG_TASK_DELAY_ACCT is enabled in the kernel.
+.TP
+.B COMMAND
+Command line of the process.
+.SH REQUIREMENTS
+.B iotop
+requires:
+.IP \(bu 2
+Linux kernel 2.6.20 or later
+.IP \(bu 2
+Kernel I/O accounting support (CONFIG_TASK_IO_ACCOUNTING)
+.IP \(bu 2
+Kernel taskstats interface (CONFIG_TASKSTATS)
+.IP \(bu 2
+Kernel delay accounting (CONFIG_TASK_DELAY_ACCT) - optional but recommended for SWAPIN and IO columns
+.IP \(bu 2
+Delay accounting must be enabled: \fBsysctl kernel.task_delayacct=1\fR
+.IP \(bu 2
+VM event counters (CONFIG_VM_EVENT_COUNTERS)
+.PP
+Root privileges or CAP_NET_ADMIN capability are required to access the taskstats interface.
+.SH EXAMPLES
+.TP
+Run iotop interactively with default settings:
+.B sudo iotop
+.TP
+Show only processes currently doing I/O:
+.B sudo iotop \-o
+.TP
+Run in batch mode, 5 iterations, 2 second delay:
+.B sudo iotop \-b \-n 5 \-d 2
+.TP
+Monitor specific process and show only processes (not threads):
+.B sudo iotop \-p 1234 \-P
+.TP
+Monitor all processes of a specific user:
+.B sudo iotop \-u www-data
+.TP
+Batch mode with timestamps and quiet output:
+.B sudo iotop \-tq \-n 10 > iotop.log
+.TP
+Show accumulated I/O instead of bandwidth:
+.B sudo iotop \-a
+.SH FILES
+.TP
+.I /proc/[pid]/io
+Per-process I/O statistics.
+.TP
+.I /proc/[pid]/stat
+Per-process status information.
+.TP
+.I /proc/[pid]/status
+Per-process status details including Tgid and Uid.
+.TP
+.I /proc/[pid]/cmdline
+Process command line.
+.TP
+.I /proc/vmstat
+Virtual memory statistics.
+.SH NOTES
+The Total DISK READ and Total DISK WRITE values represent the total bandwidth of I/O from all
+monitored processes, while the Actual DISK READ and Actual DISK WRITE values show the actual
+I/O going to/from the block devices (these can differ due to caching).
+.PP
+If delay accounting is not available (SWAPIN and IO columns show "?unavailable?"), you may need
+to enable it with:
+.PP
+.RS
+sudo sysctl -w kernel.task_delayacct=1
+.RE
+.PP
+Or add \fBkernel.task_delayacct=1\fR to \fI/etc/sysctl.conf\fR to make it persistent.
+.SH SEE ALSO
+.BR top (1),
+.BR ps (1),
+.BR pidstat (1),
+.BR iostat (1),
+.BR vmstat (8),
+.BR htop (1)
+.SH BUGS
+Report bugs at: https://github.com/AndPuQing/iotop/issues
+.SH AUTHOR
+.B iotop
+was written by PuQing.
+.PP
+This is a Rust reimplementation of the original Python iotop by Guillaume Chazarain.
+.PP
+Original Python version: http://guichaz.free.fr/iotop/
+.br
+Upstream C version: https://github.com/Tomas-M/iotop
+.SH COPYRIGHT
+Copyright \(co 2025 PuQing
+.PP
+This is free software; see the source for copying conditions. There is NO warranty; not even
+for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+.PP
+Released under the MIT License.

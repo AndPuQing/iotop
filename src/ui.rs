@@ -710,3 +710,79 @@ pub fn format_delay_percent(delay_ns: u64, duration: f64) -> String {
     let percent = (delay_ns as f64 / (duration * 1_000_000_000.0)) * 100.0;
     format!("{:.2} %", percent)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_human_size() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1024), "1.00 K");
+        assert_eq!(human_size(1536), "1.50 K");
+        assert_eq!(human_size(1024 * 1024), "1.00 M");
+        assert_eq!(human_size(1024 * 1024 * 1024), "1.00 G");
+        assert_eq!(human_size(15 * 1024), "15.0 K");
+    }
+
+    #[test]
+    fn test_format_bandwidth() {
+        assert_eq!(format_bandwidth(0, 1.0), "0 B/s");
+        assert_eq!(format_bandwidth(1024, 1.0), "1.00 K/s");
+        assert_eq!(format_bandwidth(1024 * 1024, 1.0), "1.00 M/s");
+        assert_eq!(format_bandwidth(2048, 2.0), "1.00 K/s");
+        assert_eq!(format_bandwidth(1024, 0.0), "0 B/s");
+    }
+
+    #[test]
+    fn test_format_bandwidth_kb() {
+        assert_eq!(format_bandwidth_kb(0, 1.0), "0.00 K/s");
+        assert_eq!(format_bandwidth_kb(1024, 1.0), "1.00 K/s");
+        assert_eq!(format_bandwidth_kb(2048, 2.0), "1.00 K/s");
+    }
+
+    #[test]
+    fn test_format_size_kb() {
+        assert_eq!(format_size_kb(0), "0.00 K");
+        assert_eq!(format_size_kb(1024), "1.00 K");
+        assert_eq!(format_size_kb(2048), "2.00 K");
+    }
+
+    #[test]
+    fn test_format_delay_percent() {
+        assert_eq!(format_delay_percent(0, 1.0), "0.00 %");
+        assert_eq!(format_delay_percent(1_000_000_000, 1.0), "100.00 %");
+        assert_eq!(format_delay_percent(500_000_000, 1.0), "50.00 %");
+        assert_eq!(format_delay_percent(100_000_000, 2.0), "5.00 %");
+        assert_eq!(format_delay_percent(100, 0.0), "0.00 %");
+    }
+
+    #[test]
+    fn test_sort_column_cycle() {
+        let col = SortColumn::Pid;
+        assert_eq!(col.cycle_forward(true), SortColumn::Prio);
+        assert_eq!(col.cycle_backward(true), SortColumn::Command);
+
+        let col = SortColumn::Command;
+        assert_eq!(col.cycle_forward(true), SortColumn::Pid);
+        assert_eq!(col.cycle_backward(true), SortColumn::Io);
+
+        // Test without delay accounting
+        let col = SortColumn::Read;
+        let next = col.cycle_forward(false);
+        assert_eq!(next, SortColumn::Write);
+    }
+
+    #[test]
+    fn test_ui_state_default() {
+        let state = UIState::default();
+        assert!(!state.only_active);
+        assert!(!state.accumulated);
+        assert_eq!(state.sort_column, SortColumn::Pid);
+        assert!(state.sort_reverse);
+        assert!(!state.paused);
+        assert!(!state.show_processes);
+        assert_eq!(state.scroll_offset, 0);
+    }
+}
