@@ -10,8 +10,12 @@ homepage = "https://github.com/AndPuQing/iotop"
 documentation = "https://docs.rs/iotop"
 readme = "README.md"
 keywords = ["iotop", "io", "monitoring", "performance", "system"]
-categories = ["command-line-utilities", "os::linux-apis", "development-tools::profiling"]
-exclude = [".github/", ".claude/", "assets/"]
+categories = [
+    "command-line-utilities",
+    "os::linux-apis",
+    "development-tools::profiling",
+]
+exclude = [".github/", "assets/","tests/"]
 
 [[bin]]
 name = "iotop"
@@ -19,16 +23,28 @@ path = "src/main.rs"
 
 [dependencies]
 argh = { version = "0.1" }
-nix = { version = "0.30", default-features = false, features = ["process", "user"] }
+nix = { version = "0.30", default-features = false, features = [
+    "process",
+    "user",
+] }
 anyhow = { version = "1.0", default-features = false }
-crossterm = { version = "0.29.0", default-features = false, features = ["event-stream"] }
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.29.0", default-features = false, features = [
+    "event-stream",
+] }
+ratatui = { version = "0.29", default-features = false, features = [
+    "crossterm",
+] }
 libc = { version = "0.2", default-features = false }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1", default-features = false, features = [
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "macros",
+] }
 tokio-util = { version = "0.7", default-features = false }
 futures = { version = "0.3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-linux-taskstats = {path = "patches/linux-taskstats", default-features = false }
+linux-taskstats = { path = "patches/linux-taskstats", default-features = false }
 
 [profile.release]
 codegen-units = 1
