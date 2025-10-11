@@ -2,6 +2,16 @@
 
 A Rust implementation of iotop, a tool to monitor I/O usage of processes on Linux.
 
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/AndPuQing/iotop/ci.yaml?style=flat-square&logo=github)
+![Crates.io Version](https://img.shields.io/crates/v/iotop?style=flat-square&logo=rust)
+![Crates.io Downloads (recent)](https://img.shields.io/crates/dr/iotop?style=flat-square)
+![dependency status](https://deps.rs/repo/github/AndPuQing/iotop/status.svg?style=flat-square)
+![Crates.io License](https://img.shields.io/crates/l/iotop?style=flat-square) ![Crates.io Size](https://img.shields.io/crates/size/iotop?style=flat-square)
+
+## Snapshot
+
+![iotop](./assets/Snapshot.png)
+
 ### Usage
 
 Build the project:
