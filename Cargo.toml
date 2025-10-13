@@ -2,7 +2,7 @@
 name = "iotop"
 description = "A Rust implementation of iotop - display I/O usage of processes"
 license = "MIT"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["PuQing <me@puqing.work>"]
 repository = "https://github.com/AndPuQing/iotop"
