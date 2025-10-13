@@ -1,6 +1,6 @@
 # iotop - Rust Implementation
 
-A Rust implementation of iotop, a tool to monitor I/O usage of processes on Linux.
+A modern, high-performance Rust implementation of iotop - a tool to monitor I/O usage of processes on Linux.
 
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/AndPuQing/iotop/ci.yaml?style=flat-square&logo=github)
 ![Crates.io Version](https://img.shields.io/crates/v/iotop?style=flat-square&logo=rust)
@@ -18,7 +18,7 @@ A Rust implementation of iotop, a tool to monitor I/O usage of processes on Linu
 
 ### From Cargo (Recommended)
 
-Install directly from crates.io:
+Install directly from [crates.io](https://crates.io/crates/iotop):
 ```bash
 cargo install iotop
 ```
@@ -115,27 +115,62 @@ Batch mode with timestamps:
 sudo iotop -t -b -n 10 > iotop.log
 ```
 
-### Options
+### Command-Line Options
 
-```
--o, --only               Only show processes or threads actually doing I/O
--P, --processes          Show processes, not all threads
--a, --accumulated        Show accumulated I/O instead of bandwidth
--d, --delay <DELAY>      Delay between iterations in seconds [default: 1.0]
--n, --iter <ITERATIONS>  Number of iterations before ending (infinite if not specified)
--b, --batch              Batch mode (non-interactive)
-```
+| Option | Long Form | Description |
+|--------|-----------|-------------|
+| `-o` | `--only` | Only show processes or threads actually doing I/O |
+| `-P` | `--processes` | Show processes instead of all threads |
+| `-a` | `--accumulated` | Show accumulated I/O instead of bandwidth |
+| `-d` | `--delay` | Delay between iterations in seconds [default: 1.0] |
+| `-n` | `--iterations` | Number of iterations before ending (infinite if not specified) |
+| `-b` | `--batch` | Batch mode (non-interactive) |
+| `-p` | `--pid` | Monitor specific processes/threads (can be repeated) |
+| `-u` | `--user` | Monitor processes by username or UID (can be repeated) |
+| `-t` | `--time` | Add timestamp on each line (implies `--batch`) |
+| `-q` | `--quiet` | Suppress column names and headers (implies `--batch`) |
+| `-k` | `--kilobytes` | Use kilobytes instead of human-friendly units |
 
+### Interactive Mode Controls
+
+When running in interactive mode (default), you can use the following keyboard shortcuts:
+
+| Key | Action |
+|-----|--------|
+| `q` / `Q` / `Ctrl+C` | Quit the program |
+| `o` / `O` | Toggle showing only processes doing I/O |
+| `a` / `A` | Toggle between bandwidth and accumulated I/O |
+| `p` / `P` | Toggle between showing processes and threads |
+| `r` / `R` | Reverse the current sort order |
+| `Space` | Pause/resume display updates |
+| `Left` / `Right` | Cycle through sort columns |
+| `Up` / `Down` | Scroll through process list |
+| `PageUp` / `PageDown` | Scroll by 10 rows |
+| `Home` | Jump to first sort column (or first row with Ctrl) |
+| `End` | Jump to last sort column (or last row with Ctrl) |
+
+Mouse wheel scrolling is also supported for navigating the process list.
+
+## Architecture
+
+This implementation uses:
+- **Netlink Taskstats**: Interfaces with the Linux kernel's taskstats interface via netlink sockets
+- **Procfs**: Reads process information from `/proc` filesystem
+- **Async/Await**: Tokio-based async runtime for concurrent data collection
+- **TUI Framework**: Crossterm + Ratatui for terminal rendering
 
 ### Development
 
-The project uses standard Rust tooling:
+Run the project in development mode:
 
 ```bash
-# Build
-cargo build
+# Build and run
+cargo run -- [options]
 
-# Run tests (when added)
+# Build in release mode
+cargo build --release
+
+# Run tests
 cargo test
 
 # Check for issues
@@ -143,18 +178,28 @@ cargo clippy
 
 # Format code
 cargo fmt
+
+# Run with custom options
+cargo run -- -o -d 2
 ```
 
 ### License
 
-MIT License
+MIT License - See LICENSE file for details.
 
-### Original Python Version
+### References
 
-The original Python implementation can be found at:
-- Upstream: https://github.com/Tomas-M/iotop (C version)
-- Original Python: http://guichaz.free.fr/iotop/
+- Original Python implementation: http://guichaz.free.fr/iotop/
+- C version by Tomas M: https://github.com/Tomas-M/iotop
+- Linux Taskstats documentation: https://www.kernel.org/doc/Documentation/accounting/taskstats.txt
 
 ### Contributing
 
-This is a migration project. Contributions to missing features are welcome.
+Contributions are welcome! This is an ongoing migration project. Areas for contribution include:
+
+- Additional test coverage
+- Performance optimizations
+- Documentation improvements
+- Bug fixes and feature requests
+
+Please open an issue or pull request on [GitHub](https://github.com/AndPuQing/iotop).
