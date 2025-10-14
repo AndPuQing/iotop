@@ -184,6 +184,26 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
 
                         sort_processes(&mut processes, &state);
 
+                        let available_height = tui.terminal.size()
+                            .map(|size| size.height.saturating_sub(7) as usize)
+                            .unwrap_or(10);
+
+                        // Clamp selected_row to valid range if in selection mode
+                        if state.selection_mode {
+                            if let Some(selected) = state.selected_row {
+                                let max_row = processes.len().saturating_sub(1);
+                                state.selected_row = Some(selected.min(max_row));
+
+                                // Auto-scroll to keep selected row visible
+                                let selected = state.selected_row.unwrap();
+                                if selected < state.scroll_offset {
+                                    state.scroll_offset = selected;
+                                } else if selected >= state.scroll_offset + available_height {
+                                    state.scroll_offset = selected.saturating_sub(available_height.saturating_sub(1));
+                                }
+                            }
+                        }
+
                         // Draw the UI
                         tui.draw(
                             &processes,
@@ -213,6 +233,26 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
 
                             sort_processes(&mut processes, &state);
 
+                            let available_height = tui.terminal.size()
+                                .map(|size| size.height.saturating_sub(7) as usize)
+                                .unwrap_or(10);
+
+                            // Clamp selected_row to valid range if in selection mode
+                            if state.selection_mode {
+                                if let Some(selected) = state.selected_row {
+                                    let max_row = processes.len().saturating_sub(1);
+                                    state.selected_row = Some(selected.min(max_row));
+
+                                    // Auto-scroll to keep selected row visible
+                                    let selected = state.selected_row.unwrap();
+                                    if selected < state.scroll_offset {
+                                        state.scroll_offset = selected;
+                                    } else if selected >= state.scroll_offset + available_height {
+                                        state.scroll_offset = selected.saturating_sub(available_height.saturating_sub(1));
+                                    }
+                                }
+                            }
+
                             tui.draw(
                                 &processes,
                                 snapshot.total_io,
@@ -229,14 +269,20 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                         KeyCode::Char('o') | KeyCode::Char('O') => {
                             state.only_active = !state.only_active;
                             state.scroll_offset = 0;
+                            state.selection_mode = false;
+                            state.selected_row = None;
                         }
                         KeyCode::Char('a') | KeyCode::Char('A') => {
                             state.accumulated = !state.accumulated;
                             state.scroll_offset = 0;
+                            state.selection_mode = false;
+                            state.selected_row = None;
                         }
                         KeyCode::Char('r') | KeyCode::Char('R') => {
                             state.sort_reverse = !state.sort_reverse;
                             state.scroll_offset = 0;
+                            state.selection_mode = false;
+                            state.selected_row = None;
                         }
                         KeyCode::Char(' ') => {
                             state.paused = !state.paused;
@@ -244,6 +290,8 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                         KeyCode::Char('p') | KeyCode::Char('P') => {
                             state.show_processes = !state.show_processes;
                             state.scroll_offset = 0;
+                            state.selection_mode = false;
+                            state.selected_row = None;
 
                             data_cancel_token.cancel();
                             data_cancel_token = CancellationToken::new();
@@ -259,37 +307,88 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                         KeyCode::Left => {
                             state.sort_column = state.sort_column.cycle_backward(has_delay_acct);
                             state.scroll_offset = 0;
+                            state.selection_mode = false;
+                            state.selected_row = None;
                         }
                         KeyCode::Right => {
                             state.sort_column = state.sort_column.cycle_forward(has_delay_acct);
                             state.scroll_offset = 0;
+                            state.selection_mode = false;
+                            state.selected_row = None;
                         }
                         KeyCode::Up => {
-                            state.scroll_offset = state.scroll_offset.saturating_sub(1);
+                            if !state.selection_mode {
+                                state.selection_mode = true;
+                                state.selected_row = Some(0);
+                            } else {
+                                if let Some(selected) = state.selected_row {
+                                    state.selected_row = Some(selected.saturating_sub(1));
+                                    // Adjust scroll_offset if selected row is above visible area
+                                    if state.selected_row.unwrap() < state.scroll_offset {
+                                        state.scroll_offset = state.selected_row.unwrap();
+                                    }
+                                }
+                            }
                         }
                         KeyCode::Down => {
-                            state.scroll_offset = state.scroll_offset.saturating_add(1);
+                            if !state.selection_mode {
+                                state.selection_mode = true;
+                                state.selected_row = Some(0);
+                            } else {
+                                if let Some(selected) = state.selected_row {
+                                    state.selected_row = Some(selected.saturating_add(1));
+                                }
+                            }
                         }
                         KeyCode::Home => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                if state.selection_mode {
+                                    state.selected_row = Some(0);
+                                }
                                 state.scroll_offset = 0;
                             } else {
                                 state.sort_column = SortColumn::available_columns(has_delay_acct)[0];
+                                state.selection_mode = false;
+                                state.selected_row = None;
                             }
                         }
                         KeyCode::End => {
                             if key.modifiers.contains(KeyModifiers::CONTROL) {
                                 state.scroll_offset = usize::MAX;
+                                if state.selection_mode {
+                                    state.selected_row = Some(usize::MAX);
+                                }
                             } else {
                                 let columns = SortColumn::available_columns(has_delay_acct);
                                 state.sort_column = columns[columns.len() - 1];
+                                state.selection_mode = false;
+                                state.selected_row = None;
                             }
                         }
                         KeyCode::PageUp => {
-                            state.scroll_offset = state.scroll_offset.saturating_sub(10);
+                            if state.selection_mode {
+                                if let Some(selected) = state.selected_row {
+                                    state.selected_row = Some(selected.saturating_sub(10));
+                                    if state.selected_row.unwrap() < state.scroll_offset {
+                                        state.scroll_offset = state.selected_row.unwrap();
+                                    }
+                                }
+                            } else {
+                                state.scroll_offset = state.scroll_offset.saturating_sub(10);
+                            }
                         }
                         KeyCode::PageDown => {
-                            state.scroll_offset = state.scroll_offset.saturating_add(10);
+                            if state.selection_mode {
+                                if let Some(selected) = state.selected_row {
+                                    state.selected_row = Some(selected.saturating_add(10));
+                                }
+                            } else {
+                                state.scroll_offset = state.scroll_offset.saturating_add(10);
+                            }
+                        }
+                        KeyCode::Esc => {
+                            state.selection_mode = false;
+                            state.selected_row = None;
                         }
                         _ => {}
                     },
@@ -297,10 +396,25 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
 
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
-                                state.scroll_offset = state.scroll_offset.saturating_sub(3);
+                                if state.selection_mode {
+                                    if let Some(selected) = state.selected_row {
+                                        state.selected_row = Some(selected.saturating_sub(3));
+                                        if state.selected_row.unwrap() < state.scroll_offset {
+                                            state.scroll_offset = state.selected_row.unwrap();
+                                        }
+                                    }
+                                } else {
+                                    state.scroll_offset = state.scroll_offset.saturating_sub(3);
+                                }
                             }
                             MouseEventKind::ScrollDown => {
-                                state.scroll_offset = state.scroll_offset.saturating_add(3);
+                                if state.selection_mode {
+                                    if let Some(selected) = state.selected_row {
+                                        state.selected_row = Some(selected.saturating_add(3));
+                                    }
+                                } else {
+                                    state.scroll_offset = state.scroll_offset.saturating_add(3);
+                                }
                             }
                             _ => {}
                         }

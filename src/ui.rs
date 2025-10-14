@@ -16,7 +16,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{
         Block, BorderType, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Table,
+        ScrollbarState, Table, TableState,
     },
     Frame, Terminal,
 };
@@ -154,6 +154,9 @@ pub struct UIState {
     pub paused: bool,
     pub show_processes: bool,
     pub scroll_offset: usize,
+    pub selection_mode: bool,
+    pub selected_row: Option<usize>,
+    pub table_state: TableState,
 }
 
 impl Default for UIState {
@@ -166,6 +169,9 @@ impl Default for UIState {
             paused: false,
             show_processes: false,
             scroll_offset: 0,
+            selection_mode: false,
+            selected_row: None,
+            table_state: TableState::default(),
         }
     }
 }
@@ -636,9 +642,21 @@ fn render_process_table(
         .rows(rows)
         .header(header)
         .widths(widths)
-        .block(block);
+        .block(block)
+        .row_highlight_style(Style::default().bg(Color::Rgb(60, 60, 60))); // Dark gray background for selection
 
-    f.render_widget(table, area);
+    // Update table_state to reflect current selection
+    if state.selection_mode {
+        if let Some(selected) = state.selected_row {
+            // selected_row is the absolute index, but TableState needs the visible index
+            let visible_idx = selected.saturating_sub(state.scroll_offset);
+            state.table_state.select(Some(visible_idx));
+        }
+    } else {
+        state.table_state.select(None);
+    }
+
+    f.render_stateful_widget(table, area, &mut state.table_state);
 
     if total_processes > available_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
