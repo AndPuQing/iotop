@@ -111,7 +111,6 @@ impl SortColumn {
         }
     }
 
-    /// Cycle to the next column (right arrow)
     pub fn cycle_forward(&self, has_delay_acct: bool) -> Self {
         let columns = Self::available_columns(has_delay_acct);
         let current_idx = columns.iter().position(|c| c == self);
@@ -121,14 +120,10 @@ impl SortColumn {
                 let next_idx = (idx + 1) % columns.len();
                 columns[next_idx]
             }
-            None => {
-                // Current column not in available list, return first available
-                columns[0]
-            }
+            None => columns[0],
         }
     }
 
-    /// Cycle to the previous column (left arrow)
     pub fn cycle_backward(&self, has_delay_acct: bool) -> Self {
         let columns = Self::available_columns(has_delay_acct);
         let current_idx = columns.iter().position(|c| c == self);
@@ -138,10 +133,7 @@ impl SortColumn {
                 let prev_idx = if idx == 0 { columns.len() - 1 } else { idx - 1 };
                 columns[prev_idx]
             }
-            None => {
-                // Current column not in available list, return first available
-                columns[0]
-            }
+            None => columns[0],
         }
     }
 }
@@ -786,7 +778,6 @@ mod tests {
         assert_eq!(col.cycle_forward(true), SortColumn::Pid);
         assert_eq!(col.cycle_backward(true), SortColumn::Io);
 
-        // Test without delay accounting
         let col = SortColumn::Read;
         let next = col.cycle_forward(false);
         assert_eq!(next, SortColumn::Write);

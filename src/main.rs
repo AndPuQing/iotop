@@ -14,6 +14,11 @@ use taskstats::{TaskStats, TaskStatsConnection};
 use tokio_util::sync::CancellationToken;
 use ui::{Event, SortColumn, Tui, UIState};
 
+// UI scroll constants
+const SCROLL_PAGE_SIZE: usize = 10;
+const SCROLL_WHEEL_SIZE: usize = 3;
+const UI_HEADER_HEIGHT: u16 = 7;
+
 /// A Rust implementation of iotop - display I/O usage of processes
 #[derive(FromArgs, Debug)]
 struct Args {
@@ -175,44 +180,7 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
 
                     }
                     Event::DataUpdate(snapshot) => {
-                        let mut processes: Vec<&process::ProcessInfo> =
-                            snapshot.processes.values().collect();
-
-                        if state.only_active {
-                            processes.retain(|p| p.did_some_io(state.accumulated));
-                        }
-
-                        sort_processes(&mut processes, &state);
-
-                        let available_height = tui.terminal.size()
-                            .map(|size| size.height.saturating_sub(7) as usize)
-                            .unwrap_or(10);
-
-                        // Clamp selected_row to valid range if in selection mode
-                        if state.selection_mode {
-                            if let Some(selected) = state.selected_row {
-                                let max_row = processes.len().saturating_sub(1);
-                                state.selected_row = Some(selected.min(max_row));
-
-                                // Auto-scroll to keep selected row visible
-                                let selected = state.selected_row.unwrap();
-                                if selected < state.scroll_offset {
-                                    state.scroll_offset = selected;
-                                } else if selected >= state.scroll_offset + available_height {
-                                    state.scroll_offset = selected.saturating_sub(available_height.saturating_sub(1));
-                                }
-                            }
-                        }
-
-                        // Draw the UI
-                        tui.draw(
-                            &processes,
-                            snapshot.total_io,
-                            snapshot.actual_io,
-                            snapshot.duration,
-                            &mut state,
-                            has_delay_acct,
-                        )?;
+                        render_snapshot(&mut tui, &snapshot, &mut state, has_delay_acct)?;
 
                         // Check iteration limit
                         if let Some(max_iter) = args.iterations {
@@ -224,43 +192,7 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                     }
                     Event::Render => {
                         if let Some(ref snapshot) = current_snapshot {
-                            let mut processes: Vec<&process::ProcessInfo> =
-                                snapshot.processes.values().collect();
-
-                            if state.only_active {
-                                processes.retain(|p| p.did_some_io(state.accumulated));
-                            }
-
-                            sort_processes(&mut processes, &state);
-
-                            let available_height = tui.terminal.size()
-                                .map(|size| size.height.saturating_sub(7) as usize)
-                                .unwrap_or(10);
-
-                            // Clamp selected_row to valid range if in selection mode
-                            if state.selection_mode {
-                                if let Some(selected) = state.selected_row {
-                                    let max_row = processes.len().saturating_sub(1);
-                                    state.selected_row = Some(selected.min(max_row));
-
-                                    // Auto-scroll to keep selected row visible
-                                    let selected = state.selected_row.unwrap();
-                                    if selected < state.scroll_offset {
-                                        state.scroll_offset = selected;
-                                    } else if selected >= state.scroll_offset + available_height {
-                                        state.scroll_offset = selected.saturating_sub(available_height.saturating_sub(1));
-                                    }
-                                }
-                            }
-
-                            tui.draw(
-                                &processes,
-                                snapshot.total_io,
-                                snapshot.actual_io,
-                                snapshot.duration,
-                                &mut state,
-                                has_delay_acct,
-                            )?;
+                            render_snapshot(&mut tui, snapshot, &mut state, has_delay_acct)?;
                         }
                     }
                     Event::Key(key) => match key.code {
@@ -320,13 +252,11 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                             if !state.selection_mode {
                                 state.selection_mode = true;
                                 state.selected_row = Some(0);
-                            } else {
-                                if let Some(selected) = state.selected_row {
-                                    state.selected_row = Some(selected.saturating_sub(1));
-                                    // Adjust scroll_offset if selected row is above visible area
-                                    if state.selected_row.unwrap() < state.scroll_offset {
-                                        state.scroll_offset = state.selected_row.unwrap();
-                                    }
+                            } else if let Some(selected) = state.selected_row {
+                                state.selected_row = Some(selected.saturating_sub(1));
+                                // Adjust scroll_offset if selected row is above visible area
+                                if state.selected_row.unwrap() < state.scroll_offset {
+                                    state.scroll_offset = state.selected_row.unwrap();
                                 }
                             }
                         }
@@ -334,10 +264,8 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                             if !state.selection_mode {
                                 state.selection_mode = true;
                                 state.selected_row = Some(0);
-                            } else {
-                                if let Some(selected) = state.selected_row {
-                                    state.selected_row = Some(selected.saturating_add(1));
-                                }
+                            } else if let Some(selected) = state.selected_row {
+                                state.selected_row = Some(selected.saturating_add(1));
                             }
                         }
                         KeyCode::Home => {
@@ -368,22 +296,24 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                         KeyCode::PageUp => {
                             if state.selection_mode {
                                 if let Some(selected) = state.selected_row {
-                                    state.selected_row = Some(selected.saturating_sub(10));
-                                    if state.selected_row.unwrap() < state.scroll_offset {
-                                        state.scroll_offset = state.selected_row.unwrap();
+                                    state.selected_row = Some(selected.saturating_sub(SCROLL_PAGE_SIZE));
+                                    if let Some(sel) = state.selected_row {
+                                        if sel < state.scroll_offset {
+                                            state.scroll_offset = sel;
+                                        }
                                     }
                                 }
                             } else {
-                                state.scroll_offset = state.scroll_offset.saturating_sub(10);
+                                state.scroll_offset = state.scroll_offset.saturating_sub(SCROLL_PAGE_SIZE);
                             }
                         }
                         KeyCode::PageDown => {
                             if state.selection_mode {
                                 if let Some(selected) = state.selected_row {
-                                    state.selected_row = Some(selected.saturating_add(10));
+                                    state.selected_row = Some(selected.saturating_add(SCROLL_PAGE_SIZE));
                                 }
                             } else {
-                                state.scroll_offset = state.scroll_offset.saturating_add(10);
+                                state.scroll_offset = state.scroll_offset.saturating_add(SCROLL_PAGE_SIZE);
                             }
                         }
                         KeyCode::Esc => {
@@ -398,22 +328,24 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                             MouseEventKind::ScrollUp => {
                                 if state.selection_mode {
                                     if let Some(selected) = state.selected_row {
-                                        state.selected_row = Some(selected.saturating_sub(3));
-                                        if state.selected_row.unwrap() < state.scroll_offset {
-                                            state.scroll_offset = state.selected_row.unwrap();
+                                        state.selected_row = Some(selected.saturating_sub(SCROLL_WHEEL_SIZE));
+                                        if let Some(sel) = state.selected_row {
+                                            if sel < state.scroll_offset {
+                                                state.scroll_offset = sel;
+                                            }
                                         }
                                     }
                                 } else {
-                                    state.scroll_offset = state.scroll_offset.saturating_sub(3);
+                                    state.scroll_offset = state.scroll_offset.saturating_sub(SCROLL_WHEEL_SIZE);
                                 }
                             }
                             MouseEventKind::ScrollDown => {
                                 if state.selection_mode {
                                     if let Some(selected) = state.selected_row {
-                                        state.selected_row = Some(selected.saturating_add(3));
+                                        state.selected_row = Some(selected.saturating_add(SCROLL_WHEEL_SIZE));
                                     }
                                 } else {
-                                    state.scroll_offset = state.scroll_offset.saturating_add(3);
+                                    state.scroll_offset = state.scroll_offset.saturating_add(SCROLL_WHEEL_SIZE);
                                 }
                             }
                             _ => {}
@@ -444,6 +376,58 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
 
     // Ensure terminal cleanup happens
     tui.exit()?;
+
+    Ok(())
+}
+
+/// Prepare and render a snapshot of process data to the TUI
+fn render_snapshot(
+    tui: &mut Tui,
+    snapshot: &ProcessSnapshot,
+    state: &mut UIState,
+    has_delay_acct: bool,
+) -> Result<()> {
+    let mut processes: Vec<&process::ProcessInfo> = snapshot.processes.values().collect();
+
+    if state.only_active {
+        processes.retain(|p| p.did_some_io(state.accumulated));
+    }
+
+    sort_processes(&mut processes, state);
+
+    let available_height = tui
+        .terminal
+        .size()
+        .map(|size| size.height.saturating_sub(UI_HEADER_HEIGHT) as usize)
+        .unwrap_or(10);
+
+    // Clamp selected_row to valid range if in selection mode
+    if state.selection_mode {
+        if let Some(selected) = state.selected_row {
+            let max_row = processes.len().saturating_sub(1);
+            state.selected_row = Some(selected.min(max_row));
+
+            // Auto-scroll to keep selected row visible
+            if let Some(selected) = state.selected_row {
+                if selected < state.scroll_offset {
+                    state.scroll_offset = selected;
+                } else if selected >= state.scroll_offset + available_height {
+                    state.scroll_offset =
+                        selected.saturating_sub(available_height.saturating_sub(1));
+                }
+            }
+        }
+    }
+
+    // Draw the UI
+    tui.draw(
+        &processes,
+        snapshot.total_io,
+        snapshot.actual_io,
+        snapshot.duration,
+        state,
+        has_delay_acct,
+    )?;
 
     Ok(())
 }
@@ -494,6 +478,11 @@ fn sort_processes(processes: &mut Vec<&process::ProcessInfo>, state: &UIState) {
     });
 }
 
+/// Run iotop in batch mode (non-interactive)
+///
+/// Batch mode outputs process I/O statistics to stdout in a parseable format.
+/// This function gracefully handles broken pipe errors (e.g., when output is
+/// piped to `head` or similar utilities) by returning Ok(()) when write errors occur.
 fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
     use std::io::{self, Write};
     use std::thread;
@@ -502,17 +491,14 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
     let mut iteration = 0;
 
     loop {
-        // Get timestamp if needed
         let timestamp = if args.time {
             chrono::Local::now().format("%H:%M:%S ").to_string()
         } else {
             String::new()
         };
 
-        // Refresh process data
         let (total, actual) = process_list.refresh_processes(args.processes)?;
 
-        // Print summary - handle broken pipe (unless -q)
         if !args.quiet {
             if writeln!(
                 io::stdout(),
@@ -539,7 +525,6 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             }
         }
 
-        // Print header on first iteration (unless -q)
         if iteration == 0 && !args.quiet {
             let has_delay = TaskStats::has_delay_acct();
             let header_prefix = if args.time { "    TIME " } else { "" };
@@ -576,15 +561,12 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             }
         }
 
-        // Print processes
         let mut processes: Vec<&process::ProcessInfo> = process_list.processes.values().collect();
 
-        // Filter if only active requested
         if args.only {
             processes.retain(|p| p.did_some_io(args.accumulated));
         }
 
-        // Sort by I/O (descending), then group by PID, then by TID
         processes.sort_by(|a, b| {
             let stats_a = if args.accumulated {
                 &a.stats_accum
@@ -679,7 +661,6 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             }
         }
 
-        // Check iteration limit
         if let Some(max_iter) = args.iterations {
             iteration += 1;
             if iteration >= max_iter {
@@ -687,9 +668,7 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             }
         }
 
-        // Sleep for delay
         thread::sleep(Duration::from_secs_f64(args.delay));
     }
-
     Ok(())
 }

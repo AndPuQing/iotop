@@ -1,13 +1,10 @@
 use anyhow::Result;
 use std::fmt;
 
-// Constants from Linux kernel
 const IOPRIO_CLASS_SHIFT: u32 = 13;
 const IOPRIO_PRIO_MASK: u32 = (1 << IOPRIO_CLASS_SHIFT) - 1;
-
 const IOPRIO_WHO_PROCESS: i32 = 1;
 
-// I/O priority classes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoprioClass {
     None = 0,
@@ -37,7 +34,6 @@ impl IoprioClass {
     }
 }
 
-// I/O priority value
 #[derive(Debug, Clone, Copy)]
 pub struct Ioprio {
     pub class: IoprioClass,
@@ -102,13 +98,10 @@ impl fmt::Display for Ioprio {
     }
 }
 
-// Get I/O priority for a process
 pub fn get_ioprio(pid: i32) -> Result<Ioprio> {
-    // Try using syscall
     let result = unsafe { libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, pid) };
 
     if result < 0 {
-        // If syscall fails, try fallback method
         return get_ioprio_from_sched(pid);
     }
 
@@ -123,22 +116,17 @@ pub fn get_ioprio(pid: i32) -> Result<Ioprio> {
     Ok(ioprio)
 }
 
-// Fallback: get I/O priority from scheduler info
 fn get_ioprio_from_sched(pid: i32) -> Result<Ioprio> {
-    // Get scheduler policy
     let policy = unsafe { libc::sched_getscheduler(pid) };
 
     if policy < 0 {
         anyhow::bail!("Failed to get scheduler for PID {}", pid);
     }
 
-    // Get nice value
     let nice = unsafe { libc::getpriority(libc::PRIO_PROCESS, pid as u32) };
 
-    // Convert nice to ioprio data (0-7 scale)
     let ioprio_data = ((nice + 20) / 5).clamp(0, 7) as u32;
 
-    // Determine class based on scheduler
     let class = match policy {
         libc::SCHED_FIFO | libc::SCHED_RR => IoprioClass::RealTime,
         libc::SCHED_IDLE => IoprioClass::Idle,

@@ -12,6 +12,9 @@ use tokio_util::sync::CancellationToken;
 use crate::proc_reader::ProcReader;
 use crate::taskstats::{TaskStats, TaskStatsConnection};
 
+/// Information about a single thread
+///
+/// Tracks I/O statistics and deltas for an individual thread (TID).
 #[derive(Debug, Clone)]
 pub struct ThreadInfo {
     #[allow(dead_code)]
@@ -37,6 +40,10 @@ impl ThreadInfo {
     }
 }
 
+/// Information about a process or thread group
+///
+/// In thread mode (default), each ProcessInfo represents a single thread.
+/// In process mode (-P flag), each ProcessInfo aggregates stats from all threads in a process.
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
     pub pid: i32, // Parent process ID (TGID)
@@ -148,6 +155,9 @@ impl ProcessInfo {
     }
 }
 
+/// A snapshot of process I/O statistics at a point in time
+///
+/// Used to pass process data from the async refresh stream to the UI.
 #[derive(Debug, Clone)]
 pub struct ProcessSnapshot {
     pub processes: HashMap<i32, ProcessInfo>,
@@ -156,6 +166,10 @@ pub struct ProcessSnapshot {
     pub duration: f64,
 }
 
+/// Manages collection and tracking of process I/O statistics
+///
+/// ProcessList maintains the state for all monitored processes/threads and coordinates
+/// fetching statistics from the kernel via taskstats.
 pub struct ProcessList {
     pub processes: HashMap<i32, ProcessInfo>,
     pub taskstats_conn: Arc<Mutex<TaskStatsConnection>>,
