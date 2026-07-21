@@ -23,7 +23,7 @@ path = "src/main.rs"
 
 [dependencies]
 argh = { version = "0.1" }
-nix = { version = "0.30", default-features = false, features = [
+nix = { version = "0.31", default-features = false, features = [
     "process",
     "user",
 ] }
