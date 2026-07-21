@@ -68,7 +68,7 @@ optional = true
 version = "1.0.38"
 
 [build-dependencies.bindgen]
-version = "0.65.1"
+version = "0.72.0"
 
 [features]
 default = ["executable"]
