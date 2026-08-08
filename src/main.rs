@@ -179,6 +179,7 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
     state.only_active = args.only;
     state.accumulated = args.accumulated;
     state.show_processes = args.processes;
+    state.kilobytes = args.kilobytes;
 
     // Start async data stream
     let mut data_cancel_token = CancellationToken::new();
@@ -248,8 +249,33 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                             state.selection_mode = false;
                             state.selected_row = None;
                         }
+                        KeyCode::Char('k') | KeyCode::Char('K') => {
+                            state.kilobytes = !state.kilobytes;
+                        }
+                        KeyCode::Char('c') | KeyCode::Char('C') => {
+                            state.column_mode = !state.column_mode;
+                            if state.column_mode {
+                                // Start the cursor on the current sort column.
+                                state.column_cursor = state.sort_column;
+                            }
+                        }
                         KeyCode::Char(' ') => {
-                            state.paused = !state.paused;
+                            if state.column_mode {
+                                // Toggle the selected column; never hide the last one.
+                                if state.visible_columns.is_visible(state.column_cursor) {
+                                    if state.visible_columns.count(has_delay_acct) > 1 {
+                                        state
+                                            .visible_columns
+                                            .set_visible(state.column_cursor, false);
+                                    }
+                                } else {
+                                    state
+                                        .visible_columns
+                                        .set_visible(state.column_cursor, true);
+                                }
+                            } else {
+                                state.paused = !state.paused;
+                            }
                         }
                         KeyCode::Char('p') | KeyCode::Char('P') => {
                             state.show_processes = !state.show_processes;
@@ -269,16 +295,28 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                             );
                         }
                         KeyCode::Left => {
-                            state.sort_column = state.sort_column.cycle_backward(has_delay_acct);
-                            state.scroll_offset = 0;
-                            state.selection_mode = false;
-                            state.selected_row = None;
+                            if state.column_mode {
+                                state.column_cursor =
+                                    state.column_cursor.cycle_backward(has_delay_acct);
+                            } else {
+                                state.sort_column =
+                                    state.sort_column.cycle_backward(has_delay_acct);
+                                state.scroll_offset = 0;
+                                state.selection_mode = false;
+                                state.selected_row = None;
+                            }
                         }
                         KeyCode::Right => {
-                            state.sort_column = state.sort_column.cycle_forward(has_delay_acct);
-                            state.scroll_offset = 0;
-                            state.selection_mode = false;
-                            state.selected_row = None;
+                            if state.column_mode {
+                                state.column_cursor =
+                                    state.column_cursor.cycle_forward(has_delay_acct);
+                            } else {
+                                state.sort_column =
+                                    state.sort_column.cycle_forward(has_delay_acct);
+                                state.scroll_offset = 0;
+                                state.selection_mode = false;
+                                state.selected_row = None;
+                            }
                         }
                         KeyCode::Up => {
                             if !state.selection_mode {
@@ -349,6 +387,7 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                             }
                         }
                         KeyCode::Esc => {
+                            state.column_mode = false;
                             state.selection_mode = false;
                             state.selected_row = None;
                         }
