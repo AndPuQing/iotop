@@ -20,6 +20,23 @@ jobs:
       - name: Run tests
         run: cargo test --locked --all-features --workspace
 
+  smoke-root:
+    name: Root Smoke (real kernel data path)
+    runs-on: ubuntu-latest
+    # Real taskstats/delay accounting requires root; the default runner has
+    # no CAP_NET_ADMIN, so this job runs the actual binary as root.
+    sudo: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: cargo build --release --locked
+      - name: Run root smoke test
+        run: bash scripts/smoke-root.sh target/release/iotop
+
   rustfmt:
     name: Rustfmt
     runs-on: ubuntu-latest
