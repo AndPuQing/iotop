@@ -5,17 +5,21 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// Interval at which runtime-mutable metadata (cmdline, priority) is re-read.
+/// Static metadata (UID, user) never expires and is loaded once.
+pub const META_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Cache Time-To-Live policy for different data types
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 enum CacheTTL {
-    /// Never expire - for static data like UID, TGID, cmdline
+    /// Never expire - for static data like UID, TGID
     Static,
-    /// Expire after duration - for semi-dynamic data like priority
+    /// Expire after duration - for runtime-mutable data like cmdline, priority
     Refresh(Duration),
 }
 
 /// A cached entry with timestamp and TTL policy
+#[derive(Debug, Clone)]
 struct CacheEntry {
     content: String,
     timestamp: Instant,
@@ -41,6 +45,7 @@ impl CacheEntry {
 }
 
 /// Low-level cache for /proc file contents
+#[derive(Debug, Clone)]
 struct ProcCache {
     cache: HashMap<PathBuf, CacheEntry>,
 }
@@ -117,6 +122,11 @@ pub struct ProcessMetadata {
 }
 
 /// High-level reader for /proc/[tid] data
+///
+/// Holds a persistent [`ProcCache`] so cached /proc contents are reused across
+/// refresh cycles. `Refresh` TTL entries (e.g. cmdline) are re-read after the
+/// interval, while `Static` entries (e.g. status) are loaded once.
+#[derive(Debug, Clone)]
 pub struct ProcReader {
     tid: i32,
     cache: ProcCache,
@@ -138,10 +148,53 @@ impl ProcReader {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Failed to parse status"))
     }
 
-    /// Read /proc/[tid]/cmdline
+    /// Get a bundle of metadata for process initialization (static + dynamic).
+    pub fn metadata_bundle(&mut self, pid: i32) -> Result<ProcessMetadata> {
+        // Get UID via fast method
+        let uid = self.uid_fast()?;
+
+        let status = self.status()?;
+        let (cmdline, priority_str) = self.dynamic_metadata(pid)?;
+
+        Ok(ProcessMetadata {
+            pid: status.tgid,
+            tid: status.pid,
+            uid,
+            cmdline,
+            priority_str,
+        })
+    }
+
+    /// Read /proc/[pid]/cmdline with a `Refresh` TTL so it is re-read after
+    /// `META_REFRESH_INTERVAL` (e.g. after the process `exec`s a new command).
     fn cmdline(&mut self, pid: i32) -> io::Result<String> {
         let path = format!("/proc/{}/cmdline", pid);
-        self.cache.read(path, CacheTTL::Static)
+        self.cache
+            .read(path, CacheTTL::Refresh(META_REFRESH_INTERVAL))
+    }
+
+    /// Read the runtime-mutable metadata (cmdline, priority) through the cache.
+    fn dynamic_metadata(&mut self, pid: i32) -> Result<(String, String)> {
+        let status = self.status()?;
+        let tgid = status.tgid;
+        let tid = status.pid;
+
+        // Get priority from ioprio syscall
+        let priority_str = super::ioprio::get_ioprio_string(tid);
+
+        // Get cmdline (use TGID for main process cmdline)
+        let cmdline_content = self.cmdline(pid)?;
+        let cmdline = Self::parse_cmdline(&cmdline_content, pid, tid, &status.name, tgid)?;
+
+        Ok((cmdline, priority_str))
+    }
+
+    /// Refresh only the runtime-mutable metadata (cmdline, priority).
+    ///
+    /// Used for periodic re-reading so that `exec` (new COMMAND) and `renice`
+    /// (new PRIO) are reflected. Static fields such as UID are left untouched.
+    pub fn refresh_dynamic(&mut self, pid: i32) -> Result<(String, String)> {
+        self.dynamic_metadata(pid)
     }
 
     /// Get UID efficiently via filesystem metadata (no parsing needed)
@@ -162,32 +215,6 @@ impl ProcReader {
                 "UID not available on non-Unix systems",
             ))
         }
-    }
-
-    /// Get a bundle of metadata for process initialization
-    pub fn metadata_bundle(&mut self, pid: i32) -> Result<ProcessMetadata> {
-        // Get UID via fast method
-        let uid = self.uid_fast()?;
-
-        // Get TGID and other info from status
-        let status = self.status()?;
-        let tgid = status.tgid;
-        let tid = status.pid;
-
-        // Get priority from ioprio syscall
-        let priority_str = super::ioprio::get_ioprio_string(tid);
-
-        // Get cmdline (use TGID for main process cmdline)
-        let cmdline_content = self.cmdline(pid)?;
-        let cmdline = Self::parse_cmdline(&cmdline_content, pid, tid, &status.name, tgid)?;
-
-        Ok(ProcessMetadata {
-            pid: tgid,
-            tid,
-            uid,
-            cmdline,
-            priority_str,
-        })
     }
 
     /// Parse cmdline content into a display string
@@ -267,6 +294,25 @@ mod tests {
         let result2 = cache.read("/proc/self/status", CacheTTL::Static);
         assert!(result2.is_ok());
         assert_eq!(result.unwrap(), result2.unwrap());
+    }
+
+    #[test]
+    fn test_cache_static_never_expires() {
+        let entry = CacheEntry::new("content".to_string(), CacheTTL::Static);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(entry.is_valid());
+    }
+
+    #[test]
+    fn test_cache_refresh_ttl_expires() {
+        // A Refresh entry with a 1ms TTL should expire after the interval.
+        let entry = CacheEntry::new(
+            "content".to_string(),
+            CacheTTL::Refresh(Duration::from_millis(1)),
+        );
+        assert!(entry.is_valid());
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!entry.is_valid());
     }
 
     #[test]
