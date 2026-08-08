@@ -146,6 +146,43 @@ sudo iotop -b --csv -t -q -n 5
 | | `--json` | Output one JSON object per iteration (implies `--batch`) |
 | | `--csv` | Output CSV rows (implies `--batch`) |
 
+## Configuration
+
+iotop reads persistent defaults from a TOML file. The file is looked up in
+priority order at:
+
+1. `$IOTOP_CONFIG` (explicit path)
+2. `$XDG_CONFIG_HOME/iotop/config.toml`
+3. `~/.config/iotop/config.toml`
+
+A missing file is not an error (built-in defaults are used); a file that exists
+but fails to parse is. **Command-line arguments always take precedence over the
+configuration file.** A fully commented example is shipped at
+`assets/config.example.toml`.
+
+```toml
+# ~/.config/iotop/config.toml
+delay = 2.0            # like -d
+only = true            # like -o
+processes = true       # like -P
+kilobytes = true       # like -k
+pid = [1234, 5678]     # like -p
+user = ["root"]        # like -u
+
+# Interactive table columns to display, in order.
+# Empty = the default set (TID, PRIO, USER, DISK READ, DISK WRITE,
+#         [SWAPIN, IO], COMMAND). Must appear before the [sort] table.
+columns = ["tid", "read", "write", "command"]
+
+# Default interactive sort order.
+[sort]
+column = "io"   # pid | prio | user | read | write | swapin | io | command
+reverse = false
+```
+
+All keys are optional. The `sort` and `columns` settings apply to interactive
+mode; the remaining keys mirror the equally-named command-line options.
+
 ### Interactive Mode Controls
 
 When running in interactive mode (default), you can use the following keyboard shortcuts:

@@ -31,6 +31,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::process::ProcessInfo;
+use crate::taskstats::TaskStats;
+use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -68,6 +70,36 @@ pub enum SortColumn {
     Swapin,
     Io,
     Command,
+}
+
+impl std::str::FromStr for SortColumn {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "pid" | "tid" => Ok(SortColumn::Pid),
+            "prio" => Ok(SortColumn::Prio),
+            "user" => Ok(SortColumn::User),
+            "read" => Ok(SortColumn::Read),
+            "write" => Ok(SortColumn::Write),
+            "swapin" => Ok(SortColumn::Swapin),
+            "io" => Ok(SortColumn::Io),
+            "command" | "cmd" => Ok(SortColumn::Command),
+            other => Err(format!(
+                "unknown column '{other}' (expected one of: pid, prio, user, read, write, swapin, io, command)"
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SortColumn {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
 }
 
 impl SortColumn {
@@ -149,6 +181,8 @@ pub struct UIState {
     pub selection_mode: bool,
     pub selected_row: Option<usize>,
     pub table_state: TableState,
+    /// Interactive table columns to display (empty = the default set).
+    pub columns: Vec<SortColumn>,
 }
 
 impl Default for UIState {
@@ -164,6 +198,7 @@ impl Default for UIState {
             selection_mode: false,
             selected_row: None,
             table_state: TableState::default(),
+            columns: Vec::new(),
         }
     }
 }
@@ -417,35 +452,106 @@ fn render_header(
     f.render_widget(paragraph, area);
 }
 
-const COMMON_HEADERS: [(&str, Alignment); 5] = [
-    ("TID:", Alignment::Right),
-    ("PRIO:", Alignment::Right),
-    ("USER:", Alignment::Left),
-    ("DISK READ:", Alignment::Right),
-    ("DISK WRITE:", Alignment::Right),
-];
-
-const DELAY_ACCT_HEADERS: [(&str, Alignment); 2] =
-    [("SWAPIN:", Alignment::Right), ("IO:", Alignment::Right)];
-
-const COMMAND_HEADER: (&str, Alignment) = ("COMMAND:", Alignment::Left);
-
-const COMMON_WIDTHS: [Constraint; 5] = [
-    Constraint::Length(8),  // TID
-    Constraint::Length(7),  // PRIO
-    Constraint::Length(9),  // USER
-    Constraint::Length(14), // DISK READ
-    Constraint::Length(14), // DISK WRITE
-];
-
-const DELAY_ACCT_WIDTHS: [Constraint; 2] = [
-    Constraint::Length(9), // SWAPIN
-    Constraint::Length(5), // IO
-];
-
-const COMMAND_WIDTH: Constraint = Constraint::Min(20);
-
 const COLOR_HIGHLIGHT: Color = Color::Rgb(100, 180, 255);
+
+/// Resolve the set of columns to display. An empty configured list means "use
+/// the kernel-appropriate default set"; otherwise the configured columns are
+/// used, dropping delay-accounting columns (SWAPIN/IO) when unavailable.
+fn effective_columns(configured: &[SortColumn], has_delay_acct: bool) -> Vec<SortColumn> {
+    if configured.is_empty() {
+        SortColumn::available_columns(has_delay_acct)
+    } else {
+        configured
+            .iter()
+            .copied()
+            .filter(|&c| has_delay_acct || (c != SortColumn::Swapin && c != SortColumn::Io))
+            .collect()
+    }
+}
+
+/// Header text and cell alignment for a column.
+fn column_header(col: SortColumn) -> (&'static str, Alignment) {
+    match col {
+        SortColumn::Pid => ("TID:", Alignment::Right),
+        SortColumn::Prio => ("PRIO:", Alignment::Right),
+        SortColumn::User => ("USER:", Alignment::Left),
+        SortColumn::Read => ("DISK READ:", Alignment::Right),
+        SortColumn::Write => ("DISK WRITE:", Alignment::Right),
+        SortColumn::Swapin => ("SWAPIN:", Alignment::Right),
+        SortColumn::Io => ("IO:", Alignment::Right),
+        SortColumn::Command => ("COMMAND:", Alignment::Left),
+    }
+}
+
+/// Table layout width for a column.
+fn column_width(col: SortColumn) -> Constraint {
+    match col {
+        SortColumn::Pid => Constraint::Length(8),
+        SortColumn::Prio => Constraint::Length(7),
+        SortColumn::User => Constraint::Length(9),
+        SortColumn::Read => Constraint::Length(14),
+        SortColumn::Write => Constraint::Length(14),
+        SortColumn::Swapin => Constraint::Length(9),
+        SortColumn::Io => Constraint::Length(5),
+        SortColumn::Command => Constraint::Min(20),
+    }
+}
+
+/// Render a single table cell for a column.
+fn column_cell<'a>(
+    col: SortColumn,
+    process: &'a ProcessInfo,
+    stats: &'a TaskStats,
+    duration: f64,
+    accumulated: bool,
+) -> Cell<'a> {
+    const COLOR_READ: Color = Color::Rgb(100, 180, 255); // Soft blue
+    const COLOR_WRITE: Color = Color::Rgb(255, 140, 140); // Soft red/pink
+    const COLOR_IO: Color = Color::Rgb(180, 140, 255); // Soft purple
+
+    match col {
+        SortColumn::Pid => {
+            Cell::from(Text::from(process.tid.to_string()).alignment(Alignment::Right))
+        }
+        SortColumn::Prio => {
+            Cell::from(Text::from(process.get_prio().to_string()).alignment(Alignment::Right))
+        }
+        SortColumn::User => Cell::from(Text::from(process.get_user()).alignment(Alignment::Left)),
+        SortColumn::Read => {
+            let read_str = if accumulated {
+                human_size(stats.read_bytes as i64)
+            } else {
+                format_bandwidth(stats.read_bytes, duration)
+            };
+            Cell::from(Text::from(read_str).alignment(Alignment::Right))
+                .style(Style::default().fg(COLOR_READ))
+        }
+        SortColumn::Write => {
+            let write_bytes = stats
+                .write_bytes
+                .saturating_sub(stats.cancelled_write_bytes);
+            let write_str = if accumulated {
+                human_size(write_bytes as i64)
+            } else {
+                format_bandwidth(write_bytes, duration)
+            };
+            Cell::from(Text::from(write_str).alignment(Alignment::Right))
+                .style(Style::default().fg(COLOR_WRITE))
+        }
+        SortColumn::Swapin => {
+            let swapin_delay = format_delay_percent(stats.swapin_delay_total, duration);
+            Cell::from(Text::from(swapin_delay).alignment(Alignment::Right))
+        }
+        SortColumn::Io => {
+            let io_delay = format_delay_percent(stats.blkio_delay_total, duration);
+            Cell::from(Text::from(io_delay).alignment(Alignment::Right))
+                .style(Style::default().fg(COLOR_IO))
+        }
+        SortColumn::Command => {
+            Cell::from(Text::from(process.get_cmdline()).alignment(Alignment::Left))
+        }
+    }
+}
 
 fn create_toggle_title(hotkey: char, label: &'static str, is_active: bool) -> Line<'static> {
     let base_style = Style::default().fg(COLOR_HIGHLIGHT);
@@ -476,22 +582,19 @@ fn render_process_table(
     state: &mut UIState,
     has_delay_acct: bool,
 ) {
+    let columns = effective_columns(&state.columns, has_delay_acct);
+
     let header_style = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
 
-    let mut header_cells = Vec::with_capacity(8);
-    for (text, align) in &COMMON_HEADERS {
-        header_cells.push(Cell::from(Text::from(*text).alignment(*align)));
-    }
-    if has_delay_acct {
-        for (text, align) in &DELAY_ACCT_HEADERS {
-            header_cells.push(Cell::from(Text::from(*text).alignment(*align)));
-        }
-    }
-    header_cells.push(Cell::from(
-        Text::from(COMMAND_HEADER.0).alignment(COMMAND_HEADER.1),
-    ));
+    let header_cells: Vec<Cell> = columns
+        .iter()
+        .map(|&col| {
+            let (text, align) = column_header(col);
+            Cell::from(Text::from(text).alignment(align))
+        })
+        .collect();
 
     let header = Row::new(header_cells).style(header_style).height(1);
 
@@ -508,9 +611,6 @@ fn render_process_table(
     let end = (state.scroll_offset + available_height).min(total_processes);
     let visible_processes = &processes[state.scroll_offset..end];
 
-    const COLOR_READ: Color = Color::Rgb(100, 180, 255); // Soft blue
-    const COLOR_WRITE: Color = Color::Rgb(255, 140, 140); // Soft red/pink
-    const COLOR_IO: Color = Color::Rgb(180, 140, 255); // Soft purple
     const COLOR_ACTIVE: Color = Color::White;
     const COLOR_INACTIVE: Color = Color::Gray;
 
@@ -521,62 +621,21 @@ fn render_process_table(
             &process.stats_delta
         };
 
-        let read_str = if state.accumulated {
-            human_size(stats.read_bytes as i64)
-        } else {
-            format_bandwidth(stats.read_bytes, duration)
-        };
-
-        let write_bytes = stats
-            .write_bytes
-            .saturating_sub(stats.cancelled_write_bytes);
-        let write_str = if state.accumulated {
-            human_size(write_bytes as i64)
-        } else {
-            format_bandwidth(write_bytes, duration)
-        };
-
         let row_style = if process.did_some_io(state.accumulated) {
             Style::default().fg(COLOR_ACTIVE)
         } else {
             Style::default().fg(COLOR_INACTIVE)
         };
 
-        let mut cells = vec![
-            Cell::from(Text::from(process.tid.to_string()).alignment(Alignment::Right)),
-            Cell::from(Text::from(process.get_prio().to_string()).alignment(Alignment::Right)),
-            Cell::from(Text::from(process.get_user()).alignment(Alignment::Left)),
-            Cell::from(Text::from(read_str).alignment(Alignment::Right))
-                .style(Style::default().fg(COLOR_READ)),
-            Cell::from(Text::from(write_str).alignment(Alignment::Right))
-                .style(Style::default().fg(COLOR_WRITE)),
-        ];
-
-        if has_delay_acct {
-            let swapin_delay = format_delay_percent(stats.swapin_delay_total, duration);
-            let io_delay = format_delay_percent(stats.blkio_delay_total, duration);
-            cells.push(Cell::from(
-                Text::from(swapin_delay).alignment(Alignment::Right),
-            ));
-            cells.push(
-                Cell::from(Text::from(io_delay).alignment(Alignment::Right))
-                    .style(Style::default().fg(COLOR_IO)),
-            );
-        }
-
-        cells.push(Cell::from(
-            Text::from(process.get_cmdline()).alignment(Alignment::Left),
-        ));
+        let cells: Vec<Cell> = columns
+            .iter()
+            .map(|&col| column_cell(col, process, stats, duration, state.accumulated))
+            .collect();
 
         Row::new(cells).style(row_style)
     });
 
-    let mut widths = Vec::with_capacity(8);
-    widths.extend_from_slice(&COMMON_WIDTHS);
-    if has_delay_acct {
-        widths.extend_from_slice(&DELAY_ACCT_WIDTHS);
-    }
-    widths.push(COMMAND_WIDTH);
+    let widths: Vec<Constraint> = columns.iter().map(|&col| column_width(col)).collect();
 
     let sort_row = state.sort_column.as_str();
 
@@ -793,5 +852,52 @@ mod tests {
         assert!(!state.paused);
         assert!(!state.show_processes);
         assert_eq!(state.scroll_offset, 0);
+        assert!(state.columns.is_empty());
+    }
+
+    #[test]
+    fn test_effective_columns_default_with_delay_acct() {
+        let cols = effective_columns(&[], true);
+        assert_eq!(
+            cols,
+            vec![
+                SortColumn::Pid,
+                SortColumn::Prio,
+                SortColumn::User,
+                SortColumn::Read,
+                SortColumn::Write,
+                SortColumn::Swapin,
+                SortColumn::Io,
+                SortColumn::Command
+            ]
+        );
+    }
+
+    #[test]
+    fn test_effective_columns_drops_delay_columns_without_delay_acct() {
+        let cols = effective_columns(&[], false);
+        assert_eq!(
+            cols,
+            vec![
+                SortColumn::Pid,
+                SortColumn::Prio,
+                SortColumn::User,
+                SortColumn::Read,
+                SortColumn::Write,
+                SortColumn::Command
+            ]
+        );
+    }
+
+    #[test]
+    fn test_effective_columns_uses_configured_subset() {
+        let configured = vec![SortColumn::Pid, SortColumn::Read, SortColumn::Command];
+        assert_eq!(effective_columns(&configured, true), configured);
+        // Delay-accounting columns are dropped when unavailable.
+        let with_io = vec![SortColumn::Pid, SortColumn::Io, SortColumn::Command];
+        assert_eq!(
+            effective_columns(&with_io, false),
+            vec![SortColumn::Pid, SortColumn::Command]
+        );
     }
 }

@@ -1,0 +1,61 @@
+# iotop configuration file
+#
+# Copy this file to one of the following locations (checked in order):
+#   - $IOTOP_CONFIG
+#   - $XDG_CONFIG_HOME/iotop/config.toml
+#   - ~/.config/iotop/config.toml
+#
+# Every key is optional and every value below is the built-in default.
+# Command-line arguments always take precedence over this file.
+
+# Only show processes/threads actually doing I/O (like `-o`).
+only = false
+
+# Show processes instead of all threads (like `-P`).
+processes = false
+
+# Show accumulated I/O instead of bandwidth (like `-a`).
+accumulated = false
+
+# Delay between iterations in seconds (like `-d`).
+delay = 1.0
+
+# Number of iterations before ending; omit (or set null) for infinite (like `-n`).
+# iterations = 1
+
+# Run in batch (non-interactive) mode (like `-b`).
+batch = false
+
+# Processes/threads to monitor (like `-p`, repeatable). Empty = all.
+pid = []
+
+# Users to monitor, by username or UID (like `-u`, repeatable). Empty = all.
+user = []
+
+# Add a timestamp on each output line (like `-t`, implies batch).
+time = false
+
+# Suppress column names and summary headers (like `-q`, implies batch).
+quiet = false
+
+# Use kilobytes instead of human-friendly units (like `-k`).
+kilobytes = false
+
+# Emit one JSON object per iteration (implies batch).
+json = false
+
+# Emit CSV rows (implies batch).
+csv = false
+
+# NOTE: `columns` must appear BEFORE the `[sort]` table below, since in TOML
+# every key that follows a `[table]` header belongs to that table.
+# Interactive columns to display, in order. Empty = the default set
+# (TID, PRIO, USER, DISK READ, DISK WRITE, [SWAPIN, IO], COMMAND).
+columns = []
+
+# Default interactive sort order.
+[sort]
+# One of: pid, prio, user, read, write, swapin, io, command.
+column = "pid"
+# Reverse the sort direction.
+reverse = true

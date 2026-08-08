@@ -77,6 +77,38 @@ Output CSV rows (implies \fB\-\-batch\fR). A header row is printed before the fi
 .TP
 .BR \-h ", " \-\-help
 Display help information and exit.
+.SH CONFIGURATION
+.B iotop
+reads persistent defaults from a TOML file, looked up in priority order at:
+.TP
+.B $IOTOP_CONFIG
+An explicit path.
+.TP
+.B $XDG_CONFIG_HOME/iotop/config.toml
+.TP
+.B ~/.config/iotop/config.toml
+A missing file is not an error (built-in defaults are used); a file that exists but fails to parse is. Command-line arguments always take precedence over the configuration file. A fully commented example ships at \fIassets/config.example.toml\fR.
+.PP
+Example:
+.PP
+.RS
+.nf
+delay = 2.0
+only = true
+kilobytes = true
+pid = [1234, 5678]
+user = ["root"]
+
+# Must appear before the [sort] table.
+columns = ["tid", "read", "write", "command"]
+
+[sort]
+column = "io"
+reverse = false
+.fi
+.RE
+.PP
+The \fBsort\fR and \fBcolumns\fR settings apply to interactive mode. The remaining keys mirror the equally-named command-line options.
 .SH INTERACTIVE KEYS
 The following keys are recognized in interactive mode:
 .TP

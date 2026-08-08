@@ -1,3 +1,4 @@
+mod config;
 mod ioprio;
 mod proc_reader;
 mod process;
@@ -34,9 +35,9 @@ struct Args {
     #[argh(switch, short = 'a')]
     accumulated: bool,
 
-    /// delay between iterations in seconds
-    #[argh(option, short = 'd', default = "1.0")]
-    delay: f64,
+    /// delay between iterations in seconds (defaults to 1.0, or config)
+    #[argh(option, short = 'd')]
+    delay: Option<f64>,
 
     /// number of iterations before ending (infinite if not specified)
     #[argh(option, short = 'n')]
@@ -79,23 +80,27 @@ struct Args {
 async fn main() -> Result<()> {
     let args: Args = argh::from_env();
 
+    // Load persistent defaults from the config file, then let explicitly-given
+    // command-line arguments take precedence over them.
+    let config = config::Config::load()?.merge_cli(&args);
+
     // Check for requirements
     check_requirements()?;
 
     // Resolve usernames to UIDs
-    let uids = resolve_users(&args.user)?;
+    let uids = resolve_users(&config.user)?;
 
     // Connect to taskstats
     let taskstats_conn = TaskStatsConnection::new()?;
     warn_if_taskstats_unreadable(&taskstats_conn);
     let mut process_list = ProcessList::new(taskstats_conn)
-        .with_pids(args.pid.clone())
+        .with_pids(config.pid.clone())
         .with_uids(uids.clone());
 
-    if args.batch || args.time || args.quiet || args.json || args.csv {
-        run_batch_mode(&mut process_list, &args)?;
+    if config.batch || config.time || config.quiet || config.json || config.csv {
+        run_batch_mode(&mut process_list, &config)?;
     } else {
-        run_interactive_mode(&mut process_list, &args).await?;
+        run_interactive_mode(&mut process_list, &config).await?;
     }
 
     Ok(())
@@ -167,7 +172,10 @@ fn resolve_users(users: &[String]) -> Result<Vec<u32>> {
     Ok(uids)
 }
 
-async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+async fn run_interactive_mode(
+    process_list: &mut ProcessList,
+    config: &config::Config,
+) -> Result<()> {
     let mut tui = Tui::new()?;
     tui.enter()?;
 
@@ -175,18 +183,21 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
     let mut iteration = 0;
     let has_delay_acct = TaskStats::has_delay_acct();
 
-    // Apply command line arguments to initial state
-    state.only_active = args.only;
-    state.accumulated = args.accumulated;
-    state.show_processes = args.processes;
+    // Apply command line arguments and config defaults to initial state
+    state.only_active = config.only;
+    state.accumulated = config.accumulated;
+    state.show_processes = config.processes;
+    state.sort_column = config.sort.column;
+    state.sort_reverse = config.sort.reverse;
+    state.columns = config.columns.clone();
 
     // Start async data stream
     let mut data_cancel_token = CancellationToken::new();
     let mut data_stream = ProcessList::spawn_refresh_stream(
-        1.0 / args.delay,
+        1.0 / config.delay,
         state.show_processes,
         process_list.taskstats_conn.clone(),
-        args.pid.clone(),
+        config.pid.clone(),
         process_list.uids.clone(),
         data_cancel_token.clone(),
     );
@@ -215,7 +226,7 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                         render_snapshot(&mut tui, &snapshot, &mut state, has_delay_acct)?;
 
                         // Check iteration limit
-                        if let Some(max_iter) = args.iterations {
+                        if let Some(max_iter) = config.iterations {
                             iteration += 1;
                             if iteration >= max_iter {
                                 break;
@@ -260,10 +271,10 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                             data_cancel_token.cancel();
                             data_cancel_token = CancellationToken::new();
                             data_stream = ProcessList::spawn_refresh_stream(
-                                1.0 / args.delay,
+                                1.0 / config.delay,
                                 state.show_processes,
                                 process_list.taskstats_conn.clone(),
-                                args.pid.clone(),
+                                config.pid.clone(),
                                 process_list.uids.clone(),
                                 data_cancel_token.clone(),
                             );
@@ -515,14 +526,14 @@ fn sort_processes(processes: &mut Vec<&process::ProcessInfo>, state: &UIState) {
 /// Batch mode outputs process I/O statistics to stdout in a parseable format.
 /// This function gracefully handles broken pipe errors (e.g., when output is
 /// piped to `head` or similar utilities) by returning Ok(()) when write errors occur.
-fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+fn run_batch_mode(process_list: &mut ProcessList, config: &config::Config) -> Result<()> {
     // Machine-readable output modes take precedence over the plain-text batch
     // output. They share the same refresh loop and iteration/delay semantics.
-    if args.json {
-        return run_json_mode(process_list, args);
+    if config.json {
+        return run_json_mode(process_list, config);
     }
-    if args.csv {
-        return run_csv_mode(process_list, args);
+    if config.csv {
+        return run_csv_mode(process_list, config);
     }
 
     use std::io::{self, Write};
@@ -532,15 +543,15 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
     let mut iteration = 0;
 
     loop {
-        let timestamp = if args.time {
+        let timestamp = if config.time {
             chrono::Local::now().format("%H:%M:%S ").to_string()
         } else {
             String::new()
         };
 
-        let (total, actual) = process_list.refresh_processes(args.processes)?;
+        let (total, actual) = process_list.refresh_processes(config.processes)?;
 
-        if !args.quiet {
+        if !config.quiet {
             if writeln!(
                 io::stdout(),
                 "{}Total DISK READ :   {:>14} | Total DISK WRITE :   {:>14}",
@@ -566,9 +577,9 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             }
         }
 
-        if iteration == 0 && !args.quiet {
+        if iteration == 0 && !config.quiet {
             let has_delay = TaskStats::has_delay_acct();
-            let header_prefix = if args.time { "    TIME " } else { "" };
+            let header_prefix = if config.time { "    TIME " } else { "" };
             if has_delay {
                 if writeln!(
                     io::stdout(),
@@ -604,17 +615,17 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
 
         let mut processes: Vec<&process::ProcessInfo> = process_list.processes.values().collect();
 
-        if args.only {
-            processes.retain(|p| p.did_some_io(args.accumulated));
+        if config.only {
+            processes.retain(|p| p.did_some_io(config.accumulated));
         }
 
         processes.sort_by(|a, b| {
-            let stats_a = if args.accumulated {
+            let stats_a = if config.accumulated {
                 &a.stats_accum
             } else {
                 &a.stats_delta
             };
-            let stats_b = if args.accumulated {
+            let stats_b = if config.accumulated {
                 &b.stats_accum
             } else {
                 &b.stats_delta
@@ -627,19 +638,19 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
         });
 
         for process in processes {
-            let stats = if args.accumulated {
+            let stats = if config.accumulated {
                 &process.stats_accum
             } else {
                 &process.stats_delta
             };
 
-            let read_str = if args.kilobytes {
-                if args.accumulated {
+            let read_str = if config.kilobytes {
+                if config.accumulated {
                     ui::format_size_kb(stats.read_bytes)
                 } else {
                     ui::format_bandwidth_kb(stats.read_bytes, process_list.duration)
                 }
-            } else if args.accumulated {
+            } else if config.accumulated {
                 ui::human_size(stats.read_bytes as i64)
             } else {
                 ui::format_bandwidth(stats.read_bytes, process_list.duration)
@@ -648,13 +659,13 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             let write_bytes = stats
                 .write_bytes
                 .saturating_sub(stats.cancelled_write_bytes);
-            let write_str = if args.kilobytes {
-                if args.accumulated {
+            let write_str = if config.kilobytes {
+                if config.accumulated {
                     ui::format_size_kb(write_bytes)
                 } else {
                     ui::format_bandwidth_kb(write_bytes, process_list.duration)
                 }
-            } else if args.accumulated {
+            } else if config.accumulated {
                 ui::human_size(write_bytes as i64)
             } else {
                 ui::format_bandwidth(write_bytes, process_list.duration)
@@ -702,14 +713,14 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             }
         }
 
-        if let Some(max_iter) = args.iterations {
+        if let Some(max_iter) = config.iterations {
             iteration += 1;
             if iteration >= max_iter {
                 break;
             }
         }
 
-        thread::sleep(Duration::from_secs_f64(args.delay));
+        thread::sleep(Duration::from_secs_f64(config.delay));
     }
     Ok(())
 }
@@ -726,14 +737,14 @@ fn delay_percent(delay_ns: u64, duration: f64) -> f64 {
 
 /// Sort a process list by the same rule used by the plain-text batch output:
 /// descending block-I/O delay, then PID, then TID for a stable order.
-fn sort_processes_by_io(processes: &mut Vec<&process::ProcessInfo>, args: &Args) {
+fn sort_processes_by_io(processes: &mut Vec<&process::ProcessInfo>, config: &config::Config) {
     processes.sort_by(|a, b| {
-        let stats_a = if args.accumulated {
+        let stats_a = if config.accumulated {
             &a.stats_accum
         } else {
             &a.stats_delta
         };
-        let stats_b = if args.accumulated {
+        let stats_b = if config.accumulated {
             &b.stats_accum
         } else {
             &b.stats_delta
@@ -786,7 +797,7 @@ fn collect_row(process: &process::ProcessInfo, accumulated: bool, duration: f64)
 
 /// Batch mode with `--json`: emit one JSON object per iteration, containing the
 /// iteration timestamp, total/actual disk I/O, and the process list.
-fn run_json_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+fn run_json_mode(process_list: &mut ProcessList, config: &config::Config) -> Result<()> {
     use std::io::{self, Write};
     use std::thread;
     use std::time::Duration;
@@ -794,24 +805,24 @@ fn run_json_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
     let mut iteration = 0;
 
     loop {
-        let timestamp = if args.time {
+        let timestamp = if config.time {
             chrono::Local::now().format("%H:%M:%S").to_string()
         } else {
             String::new()
         };
 
-        let (total, actual) = process_list.refresh_processes(args.processes)?;
+        let (total, actual) = process_list.refresh_processes(config.processes)?;
 
         let mut processes: Vec<&process::ProcessInfo> = process_list.processes.values().collect();
-        if args.only {
-            processes.retain(|p| p.did_some_io(args.accumulated));
+        if config.only {
+            processes.retain(|p| p.did_some_io(config.accumulated));
         }
-        sort_processes_by_io(&mut processes, args);
+        sort_processes_by_io(&mut processes, config);
 
         let rows: Vec<serde_json::Value> = processes
             .iter()
             .map(|p| {
-                let row = collect_row(p, args.accumulated, process_list.duration);
+                let row = collect_row(p, config.accumulated, process_list.duration);
                 serde_json::json!({
                     "tid": row.tid,
                     "pid": row.pid,
@@ -839,14 +850,14 @@ fn run_json_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             return Ok(());
         }
 
-        if let Some(max_iter) = args.iterations {
+        if let Some(max_iter) = config.iterations {
             iteration += 1;
             if iteration >= max_iter {
                 break;
             }
         }
 
-        thread::sleep(Duration::from_secs_f64(args.delay));
+        thread::sleep(Duration::from_secs_f64(config.delay));
     }
     Ok(())
 }
@@ -864,7 +875,7 @@ fn csv_field(value: &str) -> String {
 /// Batch mode with `--csv`: emit one CSV row per process per iteration. A header
 /// row is printed before the first iteration (unless `--quiet`). With `--time` a
 /// leading time column is added. Compatible with `-t`/`-q`.
-fn run_csv_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+fn run_csv_mode(process_list: &mut ProcessList, config: &config::Config) -> Result<()> {
     use std::io::{self, Write};
     use std::thread;
     use std::time::Duration;
@@ -873,25 +884,25 @@ fn run_csv_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
     let mut header_printed = false;
 
     loop {
-        let timestamp = if args.time {
+        let timestamp = if config.time {
             chrono::Local::now().format("%H:%M:%S").to_string()
         } else {
             String::new()
         };
 
-        let _ = process_list.refresh_processes(args.processes)?;
+        let _ = process_list.refresh_processes(config.processes)?;
 
         let has_delay = TaskStats::has_delay_acct();
 
         let mut processes: Vec<&process::ProcessInfo> = process_list.processes.values().collect();
-        if args.only {
-            processes.retain(|p| p.did_some_io(args.accumulated));
+        if config.only {
+            processes.retain(|p| p.did_some_io(config.accumulated));
         }
-        sort_processes_by_io(&mut processes, args);
+        sort_processes_by_io(&mut processes, config);
 
-        if !args.quiet && !header_printed {
+        if !config.quiet && !header_printed {
             let mut header = Vec::new();
-            if args.time {
+            if config.time {
                 header.push("time".to_string());
             }
             header.extend([
@@ -912,10 +923,10 @@ fn run_csv_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
         }
 
         for process in &processes {
-            let row = collect_row(process, args.accumulated, process_list.duration);
+            let row = collect_row(process, config.accumulated, process_list.duration);
 
             let mut fields = Vec::new();
-            if args.time {
+            if config.time {
                 fields.push(csv_field(&timestamp));
             }
             fields.push(format!("{}", row.tid));
@@ -941,14 +952,14 @@ fn run_csv_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             }
         }
 
-        if let Some(max_iter) = args.iterations {
+        if let Some(max_iter) = config.iterations {
             iteration += 1;
             if iteration >= max_iter {
                 break;
             }
         }
 
-        thread::sleep(Duration::from_secs_f64(args.delay));
+        thread::sleep(Duration::from_secs_f64(config.delay));
     }
     Ok(())
 }
