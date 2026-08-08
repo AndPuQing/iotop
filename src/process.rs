@@ -1,4 +1,5 @@
 use anyhow::Result;
+use libc::sysconf;
 use nix::unistd::{Uid, User};
 use std::collections::HashMap;
 use std::fs;
@@ -302,8 +303,10 @@ impl ProcessList {
             }
         }
 
-        // Convert from pages to bytes (assuming 4KB pages)
-        Ok((pgpgin * 4096, pgpgout * 4096))
+        // Convert from pages to bytes using the actual system page size.
+        // SAFETY: sysconf(_SC_PAGESIZE) is thread-safe and has no preconditions.
+        let page_size = unsafe { sysconf(libc::_SC_PAGESIZE) } as u64;
+        Ok((pgpgin * page_size, pgpgout * page_size))
     }
 
     fn update_process_metadata(process: &mut ProcessInfo, pid_for_status: i32) {
