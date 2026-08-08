@@ -157,14 +157,23 @@ When running in interactive mode (default), you can use the following keyboard s
 | `a` / `A` | Toggle between bandwidth and accumulated I/O |
 | `p` / `P` | Toggle between showing processes and threads |
 | `r` / `R` | Reverse the current sort order |
-| `Space` | Pause/resume display updates |
-| `Left` / `Right` | Cycle through sort columns |
+| `k` / `K` | Toggle KB units (also enabled by `-k` at startup) |
+| `c` / `C` | Enter/exit column-selection mode (see below) |
+| `Space` | Pause/resume display updates (toggle column in column mode) |
+| `Left` / `Right` | Cycle through sort columns (move cursor in column mode) |
 | `Up` / `Down` | Scroll through process list |
 | `PageUp` / `PageDown` | Scroll by 10 rows |
 | `Home` | Jump to first sort column (or first row with Ctrl) |
 | `End` | Jump to last sort column (or last row with Ctrl) |
 
 Mouse wheel scrolling is also supported for navigating the process list.
+
+### Column Selection Mode
+
+Press `c` to enter column-selection mode. The top bar shows every available column;
+`Left` / `Right` move the cursor, `Space` toggles the selected column on/off, and
+`Esc` or `c` exits. Hidden columns are shown dimmed with `~` markers. The last
+remaining visible column cannot be hidden.
 
 ## Architecture
 

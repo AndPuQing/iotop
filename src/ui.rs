@@ -85,6 +85,72 @@ impl SortColumn {
     }
 }
 
+/// Which columns are currently shown in the process table. Every column can be
+/// toggled independently from the interactive column-selection mode, so users can
+/// tailor the table to a narrow terminal or to the fields they care about.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VisibleColumns {
+    pub tid: bool,
+    pub prio: bool,
+    pub user: bool,
+    pub read: bool,
+    pub write: bool,
+    pub swapin: bool,
+    pub io: bool,
+    pub command: bool,
+}
+
+impl Default for VisibleColumns {
+    fn default() -> Self {
+        Self {
+            tid: true,
+            prio: true,
+            user: true,
+            read: true,
+            write: true,
+            swapin: true,
+            io: true,
+            command: true,
+        }
+    }
+}
+
+impl VisibleColumns {
+    pub fn is_visible(&self, column: SortColumn) -> bool {
+        match column {
+            SortColumn::Pid => self.tid,
+            SortColumn::Prio => self.prio,
+            SortColumn::User => self.user,
+            SortColumn::Read => self.read,
+            SortColumn::Write => self.write,
+            SortColumn::Swapin => self.swapin,
+            SortColumn::Io => self.io,
+            SortColumn::Command => self.command,
+        }
+    }
+
+    pub fn set_visible(&mut self, column: SortColumn, visible: bool) {
+        match column {
+            SortColumn::Pid => self.tid = visible,
+            SortColumn::Prio => self.prio = visible,
+            SortColumn::User => self.user = visible,
+            SortColumn::Read => self.read = visible,
+            SortColumn::Write => self.write = visible,
+            SortColumn::Swapin => self.swapin = visible,
+            SortColumn::Io => self.io = visible,
+            SortColumn::Command => self.command = visible,
+        }
+    }
+
+    /// Number of columns currently both available and visible.
+    pub fn count(&self, has_delay_acct: bool) -> usize {
+        SortColumn::available_columns(has_delay_acct)
+            .iter()
+            .filter(|c| self.is_visible(**c))
+            .count()
+    }
+}
+
 impl SortColumn {
     /// Get all available columns based on whether delay accounting is available
     pub fn available_columns(has_delay_acct: bool) -> Vec<SortColumn> {
@@ -145,6 +211,10 @@ pub struct UIState {
     pub sort_reverse: bool,
     pub paused: bool,
     pub show_processes: bool,
+    pub kilobytes: bool,
+    pub column_mode: bool,
+    pub column_cursor: SortColumn,
+    pub visible_columns: VisibleColumns,
     pub scroll_offset: usize,
     pub selection_mode: bool,
     pub selected_row: Option<usize>,
@@ -160,6 +230,10 @@ impl Default for UIState {
             sort_reverse: true,
             paused: false,
             show_processes: false,
+            kilobytes: false,
+            column_mode: false,
+            column_cursor: SortColumn::Pid,
+            visible_columns: VisibleColumns::default(),
             scroll_offset: 0,
             selection_mode: false,
             selected_row: None,
@@ -349,7 +423,7 @@ fn render_ui(
         ])
         .split(size);
 
-    render_header(f, chunks[0], total_io, actual_io, duration);
+    render_header(f, chunks[0], total_io, actual_io, duration, state.kilobytes);
 
     render_process_table(f, chunks[1], processes, duration, state, has_delay_acct);
 }
@@ -360,11 +434,28 @@ fn render_header(
     total_io: (u64, u64),
     actual_io: (u64, u64),
     duration: f64,
+    kilobytes: bool,
 ) {
-    let total_read_str = format_bandwidth(total_io.0, duration);
-    let total_write_str = format_bandwidth(total_io.1, duration);
-    let actual_read_str = format_bandwidth(actual_io.0, duration);
-    let actual_write_str = format_bandwidth(actual_io.1, duration);
+    let total_read_str = if kilobytes {
+        format_bandwidth_kb(total_io.0, duration)
+    } else {
+        format_bandwidth(total_io.0, duration)
+    };
+    let total_write_str = if kilobytes {
+        format_bandwidth_kb(total_io.1, duration)
+    } else {
+        format_bandwidth(total_io.1, duration)
+    };
+    let actual_read_str = if kilobytes {
+        format_bandwidth_kb(actual_io.0, duration)
+    } else {
+        format_bandwidth(actual_io.0, duration)
+    };
+    let actual_write_str = if kilobytes {
+        format_bandwidth_kb(actual_io.1, duration)
+    } else {
+        format_bandwidth(actual_io.1, duration)
+    };
 
     let text = vec![
         Line::from(vec![
@@ -417,35 +508,138 @@ fn render_header(
     f.render_widget(paragraph, area);
 }
 
-const COMMON_HEADERS: [(&str, Alignment); 5] = [
-    ("TID:", Alignment::Right),
-    ("PRIO:", Alignment::Right),
-    ("USER:", Alignment::Left),
-    ("DISK READ:", Alignment::Right),
-    ("DISK WRITE:", Alignment::Right),
-];
-
-const DELAY_ACCT_HEADERS: [(&str, Alignment); 2] =
-    [("SWAPIN:", Alignment::Right), ("IO:", Alignment::Right)];
-
-const COMMAND_HEADER: (&str, Alignment) = ("COMMAND:", Alignment::Left);
-
-const COMMON_WIDTHS: [Constraint; 5] = [
-    Constraint::Length(8),  // TID
-    Constraint::Length(7),  // PRIO
-    Constraint::Length(9),  // USER
-    Constraint::Length(14), // DISK READ
-    Constraint::Length(14), // DISK WRITE
-];
-
-const DELAY_ACCT_WIDTHS: [Constraint; 2] = [
-    Constraint::Length(9), // SWAPIN
-    Constraint::Length(5), // IO
-];
-
-const COMMAND_WIDTH: Constraint = Constraint::Min(20);
-
 const COLOR_HIGHLIGHT: Color = Color::Rgb(100, 180, 255);
+const COLOR_READ: Color = Color::Rgb(100, 180, 255); // Soft blue
+const COLOR_WRITE: Color = Color::Rgb(255, 140, 140); // Soft red/pink
+const COLOR_IO: Color = Color::Rgb(180, 140, 255); // Soft purple
+
+fn column_header(column: SortColumn) -> (&'static str, Alignment) {
+    match column {
+        SortColumn::Pid => ("TID:", Alignment::Right),
+        SortColumn::Prio => ("PRIO:", Alignment::Right),
+        SortColumn::User => ("USER:", Alignment::Left),
+        SortColumn::Read => ("DISK READ:", Alignment::Right),
+        SortColumn::Write => ("DISK WRITE:", Alignment::Right),
+        SortColumn::Swapin => ("SWAPIN:", Alignment::Right),
+        SortColumn::Io => ("IO:", Alignment::Right),
+        SortColumn::Command => ("COMMAND:", Alignment::Left),
+    }
+}
+
+fn column_width(column: SortColumn) -> Constraint {
+    match column {
+        SortColumn::Pid => Constraint::Length(8),
+        SortColumn::Prio => Constraint::Length(7),
+        SortColumn::User => Constraint::Length(9),
+        SortColumn::Read | SortColumn::Write => Constraint::Length(14),
+        SortColumn::Swapin => Constraint::Length(9),
+        SortColumn::Io => Constraint::Length(5),
+        SortColumn::Command => Constraint::Min(20),
+    }
+}
+
+/// Read bandwidth/size string for a process, honoring the KB-unit toggle.
+fn read_str(process: &ProcessInfo, state: &UIState, duration: f64) -> String {
+    let stats = if state.accumulated {
+        &process.stats_accum
+    } else {
+        &process.stats_delta
+    };
+    if state.kilobytes {
+        if state.accumulated {
+            format_size_kb(stats.read_bytes)
+        } else {
+            format_bandwidth_kb(stats.read_bytes, duration)
+        }
+    } else if state.accumulated {
+        human_size(stats.read_bytes as i64)
+    } else {
+        format_bandwidth(stats.read_bytes, duration)
+    }
+}
+
+/// Write bandwidth/size string for a process, honoring the KB-unit toggle.
+fn write_str(process: &ProcessInfo, state: &UIState, duration: f64) -> String {
+    let stats = if state.accumulated {
+        &process.stats_accum
+    } else {
+        &process.stats_delta
+    };
+    let write_bytes = stats
+        .write_bytes
+        .saturating_sub(stats.cancelled_write_bytes);
+    if state.kilobytes {
+        if state.accumulated {
+            format_size_kb(write_bytes)
+        } else {
+            format_bandwidth_kb(write_bytes, duration)
+        }
+    } else if state.accumulated {
+        human_size(write_bytes as i64)
+    } else {
+        format_bandwidth(write_bytes, duration)
+    }
+}
+
+/// Build the data cell for a process for a single column.
+fn process_cell<'a>(
+    process: &'a ProcessInfo,
+    column: SortColumn,
+    state: &UIState,
+    duration: f64,
+) -> Cell<'a> {
+    let stats = if state.accumulated {
+        &process.stats_accum
+    } else {
+        &process.stats_delta
+    };
+    match column {
+        SortColumn::Pid => {
+            Cell::from(Text::from(process.tid.to_string()).alignment(Alignment::Right))
+        }
+        SortColumn::Prio => {
+            Cell::from(Text::from(process.get_prio().to_string()).alignment(Alignment::Right))
+        }
+        SortColumn::User => Cell::from(Text::from(process.get_user()).alignment(Alignment::Left)),
+        SortColumn::Read => {
+            Cell::from(Text::from(read_str(process, state, duration)).alignment(Alignment::Right))
+                .style(Style::default().fg(COLOR_READ))
+        }
+        SortColumn::Write => {
+            Cell::from(Text::from(write_str(process, state, duration)).alignment(Alignment::Right))
+                .style(Style::default().fg(COLOR_WRITE))
+        }
+        SortColumn::Swapin => Cell::from(
+            Text::from(format_delay_percent(stats.swapin_delay_total, duration))
+                .alignment(Alignment::Right),
+        ),
+        SortColumn::Io => Cell::from(
+            Text::from(format_delay_percent(stats.blkio_delay_total, duration))
+                .alignment(Alignment::Right),
+        )
+        .style(Style::default().fg(COLOR_IO)),
+        SortColumn::Command => {
+            Cell::from(Text::from(process.get_cmdline()).alignment(Alignment::Left))
+        }
+    }
+}
+
+/// Build a header cell for a column, highlighting it when it is the column
+/// currently selected in column-selection mode.
+fn header_cell(column: SortColumn, state: &UIState) -> Cell<'static> {
+    let (text, align) = column_header(column);
+    let cell = Cell::from(Text::from(text).alignment(align));
+    if state.column_mode && state.column_cursor == column {
+        cell.style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(COLOR_HIGHLIGHT)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        cell
+    }
+}
 
 fn create_toggle_title(hotkey: char, label: &'static str, is_active: bool) -> Line<'static> {
     let base_style = Style::default().fg(COLOR_HIGHLIGHT);
@@ -468,6 +662,43 @@ fn create_toggle_title(hotkey: char, label: &'static str, is_active: bool) -> Li
     .left_aligned()
 }
 
+/// Title bar shown in column-selection mode: lists every column with its current
+/// visibility and marks the column under the cursor. Hidden columns are shown
+/// dimmed with `~` markers; the cursor column gets a highlighted background.
+fn column_mode_title(state: &UIState, has_delay_acct: bool) -> Line<'static> {
+    let mut spans = vec![
+        Span::raw("┐ "),
+        Span::styled("cols", Style::default().bold()),
+    ];
+    for column in SortColumn::available_columns(has_delay_acct) {
+        let name = column.as_str();
+        let visible = state.visible_columns.is_visible(column);
+        let is_cursor = state.column_cursor == column;
+
+        let text = if visible {
+            format!(" {} ", name)
+        } else {
+            format!("~{}~ ", name)
+        };
+        let span = if is_cursor {
+            Span::styled(
+                text,
+                Style::default().fg(Color::Black).bg(COLOR_HIGHLIGHT).bold(),
+            )
+        } else if visible {
+            Span::styled(text, Style::default().fg(Color::Gray))
+        } else {
+            Span::styled(text, Style::default().fg(Color::DarkGray))
+        };
+        spans.push(span);
+    }
+    spans.push(Span::styled(
+        "  ←/→ move · space toggle · esc/c done ┌",
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    Line::from(spans).left_aligned()
+}
+
 fn render_process_table(
     f: &mut Frame,
     area: Rect,
@@ -480,19 +711,13 @@ fn render_process_table(
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
 
-    let mut header_cells = Vec::with_capacity(8);
-    for (text, align) in &COMMON_HEADERS {
-        header_cells.push(Cell::from(Text::from(*text).alignment(*align)));
-    }
-    if has_delay_acct {
-        for (text, align) in &DELAY_ACCT_HEADERS {
-            header_cells.push(Cell::from(Text::from(*text).alignment(*align)));
-        }
-    }
-    header_cells.push(Cell::from(
-        Text::from(COMMAND_HEADER.0).alignment(COMMAND_HEADER.1),
-    ));
+    // Columns to render, filtered by user visibility preferences.
+    let columns: Vec<SortColumn> = SortColumn::available_columns(has_delay_acct)
+        .into_iter()
+        .filter(|c| state.visible_columns.is_visible(*c))
+        .collect();
 
+    let header_cells: Vec<Cell> = columns.iter().map(|c| header_cell(*c, state)).collect();
     let header = Row::new(header_cells).style(header_style).height(1);
 
     let available_height = area.height.saturating_sub(3) as usize;
@@ -508,75 +733,25 @@ fn render_process_table(
     let end = (state.scroll_offset + available_height).min(total_processes);
     let visible_processes = &processes[state.scroll_offset..end];
 
-    const COLOR_READ: Color = Color::Rgb(100, 180, 255); // Soft blue
-    const COLOR_WRITE: Color = Color::Rgb(255, 140, 140); // Soft red/pink
-    const COLOR_IO: Color = Color::Rgb(180, 140, 255); // Soft purple
     const COLOR_ACTIVE: Color = Color::White;
     const COLOR_INACTIVE: Color = Color::Gray;
 
     let rows = visible_processes.iter().map(|process| {
-        let stats = if state.accumulated {
-            &process.stats_accum
-        } else {
-            &process.stats_delta
-        };
-
-        let read_str = if state.accumulated {
-            human_size(stats.read_bytes as i64)
-        } else {
-            format_bandwidth(stats.read_bytes, duration)
-        };
-
-        let write_bytes = stats
-            .write_bytes
-            .saturating_sub(stats.cancelled_write_bytes);
-        let write_str = if state.accumulated {
-            human_size(write_bytes as i64)
-        } else {
-            format_bandwidth(write_bytes, duration)
-        };
-
         let row_style = if process.did_some_io(state.accumulated) {
             Style::default().fg(COLOR_ACTIVE)
         } else {
             Style::default().fg(COLOR_INACTIVE)
         };
 
-        let mut cells = vec![
-            Cell::from(Text::from(process.tid.to_string()).alignment(Alignment::Right)),
-            Cell::from(Text::from(process.get_prio().to_string()).alignment(Alignment::Right)),
-            Cell::from(Text::from(process.get_user()).alignment(Alignment::Left)),
-            Cell::from(Text::from(read_str).alignment(Alignment::Right))
-                .style(Style::default().fg(COLOR_READ)),
-            Cell::from(Text::from(write_str).alignment(Alignment::Right))
-                .style(Style::default().fg(COLOR_WRITE)),
-        ];
-
-        if has_delay_acct {
-            let swapin_delay = format_delay_percent(stats.swapin_delay_total, duration);
-            let io_delay = format_delay_percent(stats.blkio_delay_total, duration);
-            cells.push(Cell::from(
-                Text::from(swapin_delay).alignment(Alignment::Right),
-            ));
-            cells.push(
-                Cell::from(Text::from(io_delay).alignment(Alignment::Right))
-                    .style(Style::default().fg(COLOR_IO)),
-            );
-        }
-
-        cells.push(Cell::from(
-            Text::from(process.get_cmdline()).alignment(Alignment::Left),
-        ));
+        let cells: Vec<Cell> = columns
+            .iter()
+            .map(|c| process_cell(process, *c, state, duration))
+            .collect();
 
         Row::new(cells).style(row_style)
     });
 
-    let mut widths = Vec::with_capacity(8);
-    widths.extend_from_slice(&COMMON_WIDTHS);
-    if has_delay_acct {
-        widths.extend_from_slice(&DELAY_ACCT_WIDTHS);
-    }
-    widths.push(COMMAND_WIDTH);
+    let widths: Vec<Constraint> = columns.iter().map(|c| column_width(*c)).collect();
 
     let sort_row = state.sort_column.as_str();
 
@@ -601,6 +776,7 @@ fn render_process_table(
         .title_top(create_toggle_title('o', "nly-active", state.only_active))
         .title_top(create_toggle_title('p', "rocesses", state.show_processes))
         .title_top(create_toggle_title('r', "everse", !state.sort_reverse))
+        .title_top(create_toggle_title('k', "ilobytes", state.kilobytes))
         .title_top(
             Line::from(vec![
                 Span::raw("┐"),
@@ -615,6 +791,10 @@ fn render_process_table(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Gray));
+
+    if state.column_mode {
+        block = block.title_top(column_mode_title(state, has_delay_acct));
+    }
 
     if !scroll_indicator.is_empty() {
         block = block.title_top(
@@ -792,6 +972,22 @@ mod tests {
         assert!(state.sort_reverse);
         assert!(!state.paused);
         assert!(!state.show_processes);
+        assert!(!state.kilobytes);
+        assert!(!state.column_mode);
+        assert_eq!(state.column_cursor, SortColumn::Pid);
+        assert_eq!(state.visible_columns.count(true), 8);
+        assert_eq!(state.visible_columns.count(false), 6);
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_visible_columns_toggle() {
+        let mut vis = VisibleColumns::default();
+        assert!(vis.is_visible(SortColumn::Read));
+        vis.set_visible(SortColumn::Read, false);
+        assert!(!vis.is_visible(SortColumn::Read));
+        assert_eq!(vis.count(true), 7);
+        vis.set_visible(SortColumn::Read, true);
+        assert_eq!(vis.count(true), 8);
     }
 }
