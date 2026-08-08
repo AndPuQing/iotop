@@ -137,3 +137,93 @@ impl TaskStatsConnection {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(
+        read_bytes: u64,
+        write_bytes: u64,
+        blkio: u64,
+        swapin: u64,
+        cancelled: u64,
+    ) -> TaskStats {
+        TaskStats {
+            version: 0,
+            blkio_delay_total: blkio,
+            swapin_delay_total: swapin,
+            read_bytes,
+            write_bytes,
+            cancelled_write_bytes: cancelled,
+        }
+    }
+
+    #[test]
+    fn test_delta_subtracts_correctly() {
+        let prev = stats(100, 200, 1000, 500, 50);
+        let curr = stats(300, 400, 1500, 700, 80);
+
+        let d = curr.delta(&prev);
+        assert_eq!(d.read_bytes, 200);
+        assert_eq!(d.write_bytes, 200);
+        assert_eq!(d.blkio_delay_total, 500);
+        assert_eq!(d.swapin_delay_total, 200);
+        assert_eq!(d.cancelled_write_bytes, 30);
+    }
+
+    #[test]
+    fn test_delta_saturates_at_zero() {
+        // A counter going backwards (e.g. a kernel reset) must never underflow.
+        let prev = stats(1000, 1000, 1000, 1000, 1000);
+        let curr = stats(100, 100, 100, 100, 100);
+
+        let d = curr.delta(&prev);
+        assert_eq!(d.read_bytes, 0);
+        assert_eq!(d.write_bytes, 0);
+        assert_eq!(d.blkio_delay_total, 0);
+        assert_eq!(d.swapin_delay_total, 0);
+        assert_eq!(d.cancelled_write_bytes, 0);
+    }
+
+    #[test]
+    fn test_delta_of_equal_stats_is_zero() {
+        let s = stats(10, 20, 30, 40, 50);
+        assert!(s.delta(&s).is_all_zero());
+    }
+
+    #[test]
+    fn test_accumulate_adds_fields() {
+        let mut acc = TaskStats::default();
+        acc.accumulate(&stats(1, 2, 3, 4, 5));
+        acc.accumulate(&stats(10, 20, 30, 40, 50));
+
+        assert_eq!(acc.read_bytes, 11);
+        assert_eq!(acc.write_bytes, 22);
+        assert_eq!(acc.blkio_delay_total, 33);
+        assert_eq!(acc.swapin_delay_total, 44);
+        assert_eq!(acc.cancelled_write_bytes, 55);
+    }
+
+    #[test]
+    fn test_accumulate_saturates_at_max() {
+        let mut acc = stats(u64::MAX, u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+        acc.accumulate(&stats(1, 1, 1, 1, 1));
+
+        assert_eq!(acc.read_bytes, u64::MAX);
+        assert_eq!(acc.write_bytes, u64::MAX);
+        assert_eq!(acc.blkio_delay_total, u64::MAX);
+        assert_eq!(acc.swapin_delay_total, u64::MAX);
+        assert_eq!(acc.cancelled_write_bytes, u64::MAX);
+    }
+
+    #[test]
+    fn test_is_all_zero() {
+        assert!(TaskStats::default().is_all_zero());
+        assert!(!stats(1, 0, 0, 0, 0).is_all_zero());
+        assert!(!stats(0, 1, 0, 0, 0).is_all_zero());
+        assert!(!stats(0, 0, 1, 0, 0).is_all_zero());
+        assert!(!stats(0, 0, 0, 1, 0).is_all_zero());
+        assert!(!stats(0, 0, 0, 0, 1).is_all_zero());
+    }
+}
