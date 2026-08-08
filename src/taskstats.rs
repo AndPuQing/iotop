@@ -94,6 +94,15 @@ impl TaskStatsConnection {
         Ok(Self { client })
     }
 
+    /// Probe whether the kernel taskstats interface is actually usable by
+    /// querying our own PID. Without root or the CAP_NET_ADMIN capability the
+    /// kernel rejects taskstats requests with EPERM, so a failure here means
+    /// every per-process query will come back empty and all statistics will be
+    /// shown as 0.
+    pub fn probe(&self) -> bool {
+        self.client.pid_stats(std::process::id() as u32).is_ok()
+    }
+
     pub fn get_task_stats(&mut self, pid: i32) -> Result<Option<TaskStats>> {
         match self.client.pid_stats(pid as u32) {
             Ok(stats) => Ok(Some(TaskStats::from_kernel_stats(&stats))),

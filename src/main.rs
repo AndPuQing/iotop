@@ -79,6 +79,20 @@ async fn main() -> Result<()> {
 
     // Connect to taskstats
     let taskstats_conn = TaskStatsConnection::new()?;
+
+    // Detect whether taskstats is actually reachable. Without root or
+    // CAP_NET_ADMIN the kernel rejects every taskstats request, so all
+    // per-process I/O statistics silently come back as 0 B/s, which is
+    // misleading. Warn on stderr so batch-mode stdout stays parseable.
+    if !taskstats_conn.probe() {
+        eprintln!(
+            "iotop: warning: unable to read taskstats from the kernel \
+             (requires root privileges or CAP_NET_ADMIN). All I/O statistics \
+             will show as 0 B/s. Re-run with sudo, or grant the capability:\n  \
+             sudo setcap cap_net_admin+eip $(command -v iotop)"
+        );
+    }
+
     let mut process_list = ProcessList::new(taskstats_conn)
         .with_pids(args.pid.clone())
         .with_uids(uids.clone());
