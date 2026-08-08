@@ -69,6 +69,12 @@ Useful for minimal output in scripts.
 .BR \-k ", " \-\-kilobytes
 Use kilobytes instead of human-friendly units. Displays all values in KB/s (bandwidth) or KB (accumulated).
 .TP
+.BR \-\-json
+Output one JSON object per iteration (implies \fB\-\-batch\fR). Each object contains the iteration timestamp, the total and actual disk I/O, and a list of processes with \fBtid\fR, \fBpid\fR, \fBprio\fR, \fBuser\fR, \fBread\fR, \fBwrite\fR, \fBswapin\fR, \fBio\fR and \fBcommand\fR fields. Useful for feeding into monitoring systems (Prometheus/node_exporter text format, scripts).
+.TP
+.BR \-\-csv
+Output CSV rows (implies \fB\-\-batch\fR). A header row is printed before the first iteration unless \fB\-q\fR is given; with \fB\-t\fR a leading time column is added. Compatible with \fB\-t\fR and \fB\-q\fR.
+.TP
 .BR \-h ", " \-\-help
 Display help information and exit.
 .SH INTERACTIVE KEYS

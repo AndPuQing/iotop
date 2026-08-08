@@ -65,6 +65,14 @@ struct Args {
     /// use kilobytes instead of human-friendly units
     #[argh(switch, short = 'k')]
     kilobytes: bool,
+
+    /// output one JSON object per iteration (implies --batch)
+    #[argh(switch)]
+    json: bool,
+
+    /// output CSV rows (implies --batch)
+    #[argh(switch)]
+    csv: bool,
 }
 
 #[tokio::main]
@@ -84,7 +92,7 @@ async fn main() -> Result<()> {
         .with_pids(args.pid.clone())
         .with_uids(uids.clone());
 
-    if args.batch || args.time || args.quiet {
+    if args.batch || args.time || args.quiet || args.json || args.csv {
         run_batch_mode(&mut process_list, &args)?;
     } else {
         run_interactive_mode(&mut process_list, &args).await?;
@@ -508,6 +516,15 @@ fn sort_processes(processes: &mut Vec<&process::ProcessInfo>, state: &UIState) {
 /// This function gracefully handles broken pipe errors (e.g., when output is
 /// piped to `head` or similar utilities) by returning Ok(()) when write errors occur.
 fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+    // Machine-readable output modes take precedence over the plain-text batch
+    // output. They share the same refresh loop and iteration/delay semantics.
+    if args.json {
+        return run_json_mode(process_list, args);
+    }
+    if args.csv {
+        return run_csv_mode(process_list, args);
+    }
+
     use std::io::{self, Write};
     use std::thread;
     use std::time::Duration;
@@ -681,6 +698,243 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
             )
             .is_err()
             {
+                return Ok(());
+            }
+        }
+
+        if let Some(max_iter) = args.iterations {
+            iteration += 1;
+            if iteration >= max_iter {
+                break;
+            }
+        }
+
+        thread::sleep(Duration::from_secs_f64(args.delay));
+    }
+    Ok(())
+}
+
+/// Percentage of wall-clock time spent waiting on a delay, as a bare number
+/// (e.g. 3.5 means 3.5%). Used by the machine-readable output modes.
+fn delay_percent(delay_ns: u64, duration: f64) -> f64 {
+    if duration <= 0.0 {
+        0.0
+    } else {
+        (delay_ns as f64 / (duration * 1_000_000_000.0)) * 100.0
+    }
+}
+
+/// Sort a process list by the same rule used by the plain-text batch output:
+/// descending block-I/O delay, then PID, then TID for a stable order.
+fn sort_processes_by_io(processes: &mut Vec<&process::ProcessInfo>, args: &Args) {
+    processes.sort_by(|a, b| {
+        let stats_a = if args.accumulated {
+            &a.stats_accum
+        } else {
+            &a.stats_delta
+        };
+        let stats_b = if args.accumulated {
+            &b.stats_accum
+        } else {
+            &b.stats_delta
+        };
+        stats_b
+            .blkio_delay_total
+            .cmp(&stats_a.blkio_delay_total)
+            .then_with(|| a.pid.cmp(&b.pid))
+            .then_with(|| a.tid.cmp(&b.tid))
+    });
+}
+
+/// Per-process values (read/write bytes and delay percentages) for a given
+/// bandwidth/accumulated mode, shared by the JSON and CSV outputs.
+struct ProcessRow {
+    tid: i32,
+    pid: i32,
+    prio: String,
+    user: String,
+    read: u64,
+    write: u64,
+    swapin: f64,
+    io: f64,
+    command: String,
+}
+
+fn collect_row(process: &process::ProcessInfo, accumulated: bool, duration: f64) -> ProcessRow {
+    let stats = if accumulated {
+        &process.stats_accum
+    } else {
+        &process.stats_delta
+    };
+    let read = stats.read_bytes;
+    let write = stats.write_bytes.saturating_sub(stats.cancelled_write_bytes);
+
+    ProcessRow {
+        tid: process.tid,
+        pid: process.pid,
+        prio: process.get_prio().to_string(),
+        user: process.get_user().to_string(),
+        read,
+        write,
+        swapin: delay_percent(stats.swapin_delay_total, duration),
+        io: delay_percent(stats.blkio_delay_total, duration),
+        command: process.get_cmdline().to_string(),
+    }
+}
+
+/// Batch mode with `--json`: emit one JSON object per iteration, containing the
+/// iteration timestamp, total/actual disk I/O, and the process list.
+fn run_json_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+    use std::io::{self, Write};
+    use std::thread;
+    use std::time::Duration;
+
+    let mut iteration = 0;
+
+    loop {
+        let timestamp = if args.time {
+            chrono::Local::now().format("%H:%M:%S").to_string()
+        } else {
+            String::new()
+        };
+
+        let (total, actual) = process_list.refresh_processes(args.processes)?;
+
+        let mut processes: Vec<&process::ProcessInfo> = process_list.processes.values().collect();
+        if args.only {
+            processes.retain(|p| p.did_some_io(args.accumulated));
+        }
+        sort_processes_by_io(&mut processes, args);
+
+        let rows: Vec<serde_json::Value> = processes
+            .iter()
+            .map(|p| {
+                let row = collect_row(p, args.accumulated, process_list.duration);
+                serde_json::json!({
+                    "tid": row.tid,
+                    "pid": row.pid,
+                    "prio": row.prio,
+                    "user": row.user,
+                    "read": row.read,
+                    "write": row.write,
+                    "swapin": row.swapin,
+                    "io": row.io,
+                    "command": row.command,
+                })
+            })
+            .collect();
+
+        let obj = serde_json::json!({
+            "timestamp": timestamp,
+            "total_read": total.0,
+            "total_write": total.1,
+            "actual_read": actual.0,
+            "actual_write": actual.1,
+            "processes": rows,
+        });
+
+        if writeln!(io::stdout(), "{}", serde_json::to_string(&obj)?).is_err() {
+            return Ok(());
+        }
+
+        if let Some(max_iter) = args.iterations {
+            iteration += 1;
+            if iteration >= max_iter {
+                break;
+            }
+        }
+
+        thread::sleep(Duration::from_secs_f64(args.delay));
+    }
+    Ok(())
+}
+
+/// Escape a single CSV field: quote it when it contains a comma, quote, or
+/// newline, and double any embedded quotes.
+fn csv_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+/// Batch mode with `--csv`: emit one CSV row per process per iteration. A header
+/// row is printed before the first iteration (unless `--quiet`). With `--time` a
+/// leading time column is added. Compatible with `-t`/`-q`.
+fn run_csv_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+    use std::io::{self, Write};
+    use std::thread;
+    use std::time::Duration;
+
+    let mut iteration = 0;
+    let mut header_printed = false;
+
+    loop {
+        let timestamp = if args.time {
+            chrono::Local::now().format("%H:%M:%S").to_string()
+        } else {
+            String::new()
+        };
+
+        let _ = process_list.refresh_processes(args.processes)?;
+
+        let has_delay = TaskStats::has_delay_acct();
+
+        let mut processes: Vec<&process::ProcessInfo> = process_list.processes.values().collect();
+        if args.only {
+            processes.retain(|p| p.did_some_io(args.accumulated));
+        }
+        sort_processes_by_io(&mut processes, args);
+
+        if !args.quiet && !header_printed {
+            let mut header = Vec::new();
+            if args.time {
+                header.push("time".to_string());
+            }
+            header.extend([
+                "tid".to_string(),
+                "pid".to_string(),
+                "prio".to_string(),
+                "user".to_string(),
+                "read".to_string(),
+                "write".to_string(),
+                "swapin".to_string(),
+                "io".to_string(),
+                "command".to_string(),
+            ]);
+            if writeln!(io::stdout(), "{}", header.join(",")).is_err() {
+                return Ok(());
+            }
+            header_printed = true;
+        }
+
+        for process in &processes {
+            let row = collect_row(process, args.accumulated, process_list.duration);
+
+            let mut fields = Vec::new();
+            if args.time {
+                fields.push(csv_field(&timestamp));
+            }
+            fields.push(format!("{}", row.tid));
+            fields.push(format!("{}", row.pid));
+            fields.push(csv_field(&row.prio));
+            fields.push(csv_field(&row.user));
+            fields.push(format!("{}", row.read));
+            fields.push(format!("{}", row.write));
+            fields.push(if has_delay {
+                format!("{:.2}", row.swapin)
+            } else {
+                String::new()
+            });
+            fields.push(if has_delay {
+                format!("{:.2}", row.io)
+            } else {
+                String::new()
+            });
+            fields.push(csv_field(&row.command));
+
+            if writeln!(io::stdout(), "{}", fields.join(",")).is_err() {
                 return Ok(());
             }
         }

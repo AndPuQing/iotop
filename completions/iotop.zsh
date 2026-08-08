@@ -15,6 +15,8 @@ _iotop() {
         '(-t --time)'{-t,--time}'[add timestamp on each line (implies --batch)]'
         '(-q --quiet)'{-q,--quiet}'[suppress column names and headers (implies --batch)]'
         '(-k --kilobytes)'{-k,--kilobytes}'[use kilobytes instead of human-friendly units]'
+        '--json[output one JSON object per iteration (implies --batch)]'
+        '--csv[output CSV rows (implies --batch)]'
         '(-h --help)'{-h,--help}'[show help information]'
     )
 

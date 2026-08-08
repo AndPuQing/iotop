@@ -115,6 +115,19 @@ Batch mode with timestamps:
 sudo iotop -t -b -n 10 > iotop.log
 ```
 
+Machine-readable output for scripts / monitoring (JSON and CSV both imply `--batch`):
+
+One JSON object per iteration, with the total/actual disk I/O and the process list:
+```bash
+sudo iotop -b --json -n 1
+```
+
+CSV rows (header printed unless `-q`; add a leading time column with `-t`):
+```bash
+sudo iotop -b --csv -n 5
+sudo iotop -b --csv -t -q -n 5
+```
+
 ### Command-Line Options
 
 | Option | Long Form | Description |
@@ -130,6 +143,8 @@ sudo iotop -t -b -n 10 > iotop.log
 | `-t` | `--time` | Add timestamp on each line (implies `--batch`) |
 | `-q` | `--quiet` | Suppress column names and headers (implies `--batch`) |
 | `-k` | `--kilobytes` | Use kilobytes instead of human-friendly units |
+| | `--json` | Output one JSON object per iteration (implies `--batch`) |
+| | `--csv` | Output CSV rows (implies `--batch`) |
 
 ### Interactive Mode Controls
 

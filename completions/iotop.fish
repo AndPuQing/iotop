@@ -12,4 +12,6 @@ complete -c iotop -s u -l user -d 'Users to monitor' -x -a '(__fish_complete_use
 complete -c iotop -s t -l time -d 'Add timestamp on each line (implies --batch)'
 complete -c iotop -s q -l quiet -d 'Suppress column names and headers (implies --batch)'
 complete -c iotop -s k -l kilobytes -d 'Use kilobytes instead of human-friendly units'
+complete -c iotop -l json -d 'Output one JSON object per iteration (implies --batch)'
+complete -c iotop -l csv -d 'Output CSV rows (implies --batch)'
 complete -c iotop -s h -l help -d 'Show help information'
