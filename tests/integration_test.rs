@@ -73,18 +73,26 @@ fn test_json_output_is_valid() {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: serde_json::Value = serde_json::from_str(stdout.trim())
-        .expect("--json output must be valid JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("--json output must be valid JSON");
 
     let obj = value.as_object().expect("top-level JSON must be an object");
-    for key in ["total_read", "total_write", "actual_read", "actual_write", "processes"] {
+    for key in [
+        "total_read",
+        "total_write",
+        "actual_read",
+        "actual_write",
+        "processes",
+    ] {
         assert!(obj.contains_key(key), "missing JSON key: {}", key);
     }
     let processes = obj["processes"]
         .as_array()
         .expect("processes must be an array");
     if let Some(first) = processes.first() {
-        for key in ["tid", "prio", "user", "read", "write", "swapin", "io", "command"] {
+        for key in [
+            "tid", "prio", "user", "read", "write", "swapin", "io", "command",
+        ] {
             assert!(
                 first.as_object().unwrap().contains_key(key),
                 "missing per-process JSON key: {}",
@@ -111,7 +119,9 @@ fn test_csv_output_is_valid() {
     let mut lines = stdout.lines();
     let header = lines.next().expect("CSV must have a header row");
     let header_cols: Vec<&str> = header.split(',').collect();
-    for col in ["tid", "pid", "prio", "user", "read", "write", "swapin", "io", "command"] {
+    for col in [
+        "tid", "pid", "prio", "user", "read", "write", "swapin", "io", "command",
+    ] {
         assert!(header_cols.contains(&col), "missing CSV column: {}", col);
     }
     if let Some(row) = lines.next() {
