@@ -13,22 +13,19 @@ pub struct TaskStats {
     pub cancelled_write_bytes: u64,
 }
 
-// Global flag to detect if CONFIG_TASK_DELAY_ACCT is enabled
-static HAS_DELAY_ACCT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 impl TaskStats {
+    // Detect whether CONFIG_TASK_DELAY_ACCT is enabled by reading the kernel
+    // sysctl directly (value 1 means enabled), instead of relying on the
+    // post-hoc heuristic of observing a non-zero blkio_delay.
     pub fn has_delay_acct() -> bool {
-        HAS_DELAY_ACCT.load(std::sync::atomic::Ordering::Relaxed)
+        std::fs::read_to_string("/proc/sys/kernel/task_delayacct")
+            .map(|contents| contents.trim() == "1")
+            .unwrap_or(false)
     }
 
     pub fn from_kernel_stats(stats: &KernelTaskStats) -> Self {
         let blkio_delay = stats.delays.blkio.delay_total.as_nanos() as u64;
         let swapin_delay = stats.delays.swapin.delay_total.as_nanos() as u64;
-
-        // Heuristic to detect if CONFIG_TASK_DELAY_ACCT is enabled
-        if !HAS_DELAY_ACCT.load(std::sync::atomic::Ordering::Relaxed) && blkio_delay != 0 {
-            HAS_DELAY_ACCT.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
 
         Self {
             version: 0,
