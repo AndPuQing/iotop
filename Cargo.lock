@@ -558,6 +558,7 @@ dependencies = [
  "linux-taskstats",
  "nix",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

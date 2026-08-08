@@ -5,7 +5,7 @@ _iotop() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="-o --only -P --processes -a --accumulated -d --delay -n --iter -b --batch -p --pid -u --user -t --time -q --quiet -k --kilobytes --json --csv -h --help"
+    opts="-o --only -P --processes -a --accumulated -d --delay -n --iter -b --batch -p --pid -u --user -c --command -t --time -q --quiet -k --kilobytes --json --csv -h --help"
 
     case "${prev}" in
         -d|--delay)
@@ -26,6 +26,11 @@ _iotop() {
         -u|--user)
             # Complete with usernames
             COMPREPLY=( $(compgen -u -- ${cur}) )
+            return 0
+            ;;
+        -c|--command)
+            # Complete with running command names
+            COMPREPLY=( $(compgen -W "$(ps -e -o comm= | sort -u | tr '\n' ' ')" -- ${cur}) )
             return 0
             ;;
         *)

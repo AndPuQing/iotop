@@ -12,6 +12,7 @@ _iotop() {
         '(-b --batch)'{-b,--batch}'[batch mode (non-interactive)]'
         '*'{-p,--pid}'[processes/threads to monitor]:pid:_pids'
         '*'{-u,--user}'[users to monitor]:user:_users'
+        '*'{-c,--command}'[only show processes whose command line matches the regex]:regex:_command_names -e'
         '(-t --time)'{-t,--time}'[add timestamp on each line (implies --batch)]'
         '(-q --quiet)'{-q,--quiet}'[suppress column names and headers (implies --batch)]'
         '(-k --kilobytes)'{-k,--kilobytes}'[use kilobytes instead of human-friendly units]'

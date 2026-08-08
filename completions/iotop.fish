@@ -9,6 +9,7 @@ complete -c iotop -s n -l iter -d 'Number of iterations before ending' -x -a '5 
 complete -c iotop -s b -l batch -d 'Batch mode (non-interactive)'
 complete -c iotop -s p -l pid -d 'Processes/threads to monitor' -x -a '(__fish_complete_pids)'
 complete -c iotop -s u -l user -d 'Users to monitor' -x -a '(__fish_complete_users)'
+complete -c iotop -s c -l command -d 'Only show processes whose command line matches the regex' -x
 complete -c iotop -s t -l time -d 'Add timestamp on each line (implies --batch)'
 complete -c iotop -s q -l quiet -d 'Suppress column names and headers (implies --batch)'
 complete -c iotop -s k -l kilobytes -d 'Use kilobytes instead of human-friendly units'
