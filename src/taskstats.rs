@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use linux_taskstats::{Client, TaskStats as KernelTaskStats};
 
 // Our TaskStats structure that contains the fields we care about
@@ -77,27 +77,54 @@ impl TaskStats {
     }
 }
 
+/// Result of probing whether taskstats is usable with the current privileges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskstatsAccess {
+    /// taskstats is accessible and I/O statistics can be read.
+    Accessible,
+    /// taskstats exists but the current user lacks permission to read it.
+    PermissionDenied,
+    /// taskstats is not supported by the running kernel.
+    Unsupported,
+}
+
 pub struct TaskStatsConnection {
     client: Client,
 }
 
 impl TaskStatsConnection {
     pub fn new() -> Result<Self> {
-        let client = Client::open().context(
-            "Failed to create taskstats client.\n\
-             This program requires root privileges or CAP_NET_ADMIN capability.\n\
-             Try running with: sudo iotop",
-        )?;
+        let client = match Client::open() {
+            Ok(client) => client,
+            Err(linux_taskstats::Error::NoFamilyId) => {
+                anyhow::bail!(
+                    "Could not run iotop: the kernel does not support taskstats\n\
+                     (missing CONFIG_TASKSTATS). I/O statistics cannot be collected."
+                );
+            }
+            Err(err) => {
+                anyhow::bail!(
+                    "Failed to create the taskstats client: {err}\n\
+                     This program requires root privileges or the CAP_NET_ADMIN capability.\n\
+                     Try running with: sudo iotop"
+                );
+            }
+        };
         Ok(Self { client })
     }
 
-    /// Probe whether the kernel taskstats interface is actually usable by
-    /// querying our own PID. Without root or the CAP_NET_ADMIN capability the
-    /// kernel rejects taskstats requests with EPERM, so a failure here means
-    /// every per-process query will come back empty and all statistics will be
-    /// shown as 0.
-    pub fn probe(&self) -> bool {
-        self.client.pid_stats(std::process::id() as u32).is_ok()
+    /// Probe whether taskstats is readable with the current privileges.
+    ///
+    /// `Client::open()` already succeeded, so the kernel exposes taskstats;
+    /// a failure to read our own statistics therefore almost always means the
+    /// caller lacks the required permission (root or CAP_NET_ADMIN), rather
+    /// than that the kernel is unsupported.
+    pub fn probe_access(&self) -> TaskstatsAccess {
+        match self.client.pid_stats(std::process::id()) {
+            Ok(_) => TaskstatsAccess::Accessible,
+            Err(linux_taskstats::Error::Netlink(_)) => TaskstatsAccess::PermissionDenied,
+            Err(_) => TaskstatsAccess::Unsupported,
+        }
     }
 
     pub fn get_task_stats(&mut self, pid: i32) -> Result<Option<TaskStats>> {

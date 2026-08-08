@@ -79,20 +79,7 @@ async fn main() -> Result<()> {
 
     // Connect to taskstats
     let taskstats_conn = TaskStatsConnection::new()?;
-
-    // Detect whether taskstats is actually reachable. Without root or
-    // CAP_NET_ADMIN the kernel rejects every taskstats request, so all
-    // per-process I/O statistics silently come back as 0 B/s, which is
-    // misleading. Warn on stderr so batch-mode stdout stays parseable.
-    if !taskstats_conn.probe() {
-        eprintln!(
-            "iotop: warning: unable to read taskstats from the kernel \
-             (requires root privileges or CAP_NET_ADMIN). All I/O statistics \
-             will show as 0 B/s. Re-run with sudo, or grant the capability:\n  \
-             sudo setcap cap_net_admin+eip $(command -v iotop)"
-        );
-    }
-
+    warn_if_taskstats_unreadable(&taskstats_conn);
     let mut process_list = ProcessList::new(taskstats_conn)
         .with_pids(args.pid.clone())
         .with_uids(uids.clone());
@@ -104,6 +91,29 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Warn (to stderr) when taskstats is not readable with the current privileges,
+/// so the user is not misled by silent 0 B/s output. This runs in both batch and
+/// interactive modes but never aborts the program. It is a no-op when running as
+/// root or with CAP_NET_ADMIN.
+fn warn_if_taskstats_unreadable(conn: &taskstats::TaskStatsConnection) {
+    match conn.probe_access() {
+        taskstats::TaskstatsAccess::Accessible => {}
+        taskstats::TaskstatsAccess::PermissionDenied => {
+            eprintln!(
+                "WARNING: cannot read per-process I/O statistics (needs root or the CAP_NET_ADMIN capability).\n\
+                 Per-process bandwidth will show 0 B/s instead of real data.\n\
+                 Run with sudo, or grant the capability once:\n\
+                   sudo setcap cap_net_admin+ep $(command -v iotop)"
+            );
+        }
+        taskstats::TaskstatsAccess::Unsupported => {
+            eprintln!(
+                "WARNING: taskstats is unavailable on this system; per-process I/O statistics will show 0 B/s."
+            );
+        }
+    }
 }
 
 fn check_requirements() -> Result<()> {
