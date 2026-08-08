@@ -319,9 +319,9 @@ impl ProcessList {
         // Static metadata (UID, user) is loaded once; dynamic metadata (cmdline,
         // prio) is re-read every META_REFRESH_INTERVAL so that `exec` (COMMAND)
         // and `renice` (PRIO) changes are picked up.
-        let refresh_due = process.last_metadata_refresh.is_none_or(|t| {
-            now.duration_since(t) >= META_REFRESH_INTERVAL
-        });
+        let refresh_due = process
+            .last_metadata_refresh
+            .is_none_or(|t| now.duration_since(t) >= META_REFRESH_INTERVAL);
 
         if process.metadata_initialized && !refresh_due {
             return;
@@ -557,5 +557,141 @@ impl ProcessList {
         self.processes.retain(|_, p| !p.threads.is_empty());
 
         Ok(((total_read, total_write), (actual_read, actual_write)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats_with(read: u64, write: u64, blkio: u64, swapin: u64) -> TaskStats {
+        TaskStats {
+            version: 0,
+            blkio_delay_total: blkio,
+            swapin_delay_total: swapin,
+            read_bytes: read,
+            write_bytes: write,
+            cancelled_write_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn test_thread_update_stats_first_call_no_delta() {
+        let mut thread = ThreadInfo::new(42);
+        assert!(thread.stats_total.is_none());
+        assert!(thread.stats_delta.is_all_zero());
+
+        thread.update_stats(stats_with(100, 200, 300, 400));
+        assert_eq!(thread.stats_total.unwrap().read_bytes, 100);
+        // With no previous baseline, the first delta must stay zero.
+        assert!(thread.stats_delta.is_all_zero());
+    }
+
+    #[test]
+    fn test_thread_update_stats_computes_delta() {
+        let mut thread = ThreadInfo::new(42);
+        thread.update_stats(stats_with(100, 200, 300, 400));
+        thread.update_stats(stats_with(150, 250, 350, 450));
+
+        assert_eq!(thread.stats_delta.read_bytes, 50);
+        assert_eq!(thread.stats_delta.write_bytes, 50);
+        assert_eq!(thread.stats_delta.blkio_delay_total, 50);
+        assert_eq!(thread.stats_delta.swapin_delay_total, 50);
+        assert_eq!(thread.stats_total.unwrap().read_bytes, 150);
+    }
+
+    #[test]
+    fn test_process_update_stats_empty_returns_false() {
+        let mut process = ProcessInfo::new(1);
+        assert!(!process.update_stats());
+    }
+
+    #[test]
+    fn test_process_update_stats_aggregates_delta() {
+        let mut process = ProcessInfo::new(1);
+
+        let mut t1 = ThreadInfo::new(11);
+        t1.update_stats(stats_with(100, 0, 0, 0));
+        t1.update_stats(stats_with(110, 0, 0, 0)); // delta read = 10
+
+        let mut t2 = ThreadInfo::new(12);
+        t2.update_stats(stats_with(0, 100, 0, 0));
+        t2.update_stats(stats_with(0, 130, 0, 0)); // delta write = 30
+
+        process.threads.insert(11, t1);
+        process.threads.insert(12, t2);
+
+        assert!(process.update_stats());
+        assert_eq!(process.stats_delta.read_bytes, 10);
+        assert_eq!(process.stats_delta.write_bytes, 30);
+        // Bundled delta are accumulated into stats_accum.
+        assert_eq!(process.stats_accum.read_bytes, 10);
+        assert_eq!(process.stats_accum.write_bytes, 30);
+    }
+
+    #[test]
+    fn test_process_update_stats_averages_delays() {
+        let mut process = ProcessInfo::new(1);
+        for tid in [11, 12] {
+            let mut thread = ThreadInfo::new(tid);
+            thread.update_stats(stats_with(0, 0, 100, 200));
+            thread.update_stats(stats_with(0, 0, 200, 400)); // delta blkio=100, swapin=200
+            process.threads.insert(tid, thread);
+        }
+
+        assert!(process.update_stats());
+        // Sum of blkio deltas = 200, swapin = 400; divided across 2 threads.
+        assert_eq!(process.stats_delta.blkio_delay_total, 100);
+        assert_eq!(process.stats_delta.swapin_delay_total, 200);
+    }
+
+    #[test]
+    fn test_process_update_stats_delay_average_rounds_down() {
+        let mut process = ProcessInfo::new(1);
+        for tid in [11, 12, 13] {
+            let mut thread = ThreadInfo::new(tid);
+            thread.update_stats(stats_with(0, 0, 0, 0));
+            thread.update_stats(stats_with(0, 0, 1, 0)); // delta blkio = 1 each
+            process.threads.insert(tid, thread);
+        }
+        assert!(process.update_stats());
+        // 3 / 3 = 1
+        assert_eq!(process.stats_delta.blkio_delay_total, 1);
+
+        // Add a 4th thread with delta blkio = 2 → sum 5, 5 / 4 = 1 (integer division).
+        let mut t4 = ThreadInfo::new(14);
+        t4.update_stats(stats_with(0, 0, 0, 0));
+        t4.update_stats(stats_with(0, 0, 2, 0));
+        process.threads.insert(14, t4);
+        assert!(process.update_stats());
+        assert_eq!(process.stats_delta.blkio_delay_total, 1);
+    }
+
+    #[test]
+    fn test_did_some_io_delta_mode_from_threads() {
+        let mut process = ProcessInfo::new(1);
+        // No threads → no I/O.
+        assert!(!process.did_some_io(false));
+
+        let mut t1 = ThreadInfo::new(11);
+        t1.update_stats(stats_with(100, 0, 0, 0));
+        t1.update_stats(stats_with(100, 0, 0, 0)); // delta = 0
+        process.threads.insert(11, t1);
+        assert!(!process.did_some_io(false));
+
+        let mut t2 = ThreadInfo::new(12);
+        t2.update_stats(stats_with(0, 5, 0, 0));
+        t2.update_stats(stats_with(0, 9, 0, 0)); // delta write = 4
+        process.threads.insert(12, t2);
+        assert!(process.did_some_io(false));
+    }
+
+    #[test]
+    fn test_did_some_io_accumulated_mode() {
+        let mut process = ProcessInfo::new(1);
+        assert!(!process.did_some_io(true));
+
+        process.stats_accum = stats_with(1, 0, 0, 0);
+        assert!(process.did_some_io(true));
     }
 }

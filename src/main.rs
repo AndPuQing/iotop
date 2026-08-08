@@ -767,7 +767,9 @@ fn collect_row(process: &process::ProcessInfo, accumulated: bool, duration: f64)
         &process.stats_delta
     };
     let read = stats.read_bytes;
-    let write = stats.write_bytes.saturating_sub(stats.cancelled_write_bytes);
+    let write = stats
+        .write_bytes
+        .saturating_sub(stats.cancelled_write_bytes);
 
     ProcessRow {
         tid: process.tid,

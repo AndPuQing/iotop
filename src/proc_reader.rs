@@ -361,4 +361,57 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "python script.py");
     }
+
+    #[test]
+    fn test_metadata_bundle_self() {
+        // metadata_bundle must work against /proc/self without root privileges.
+        let pid = std::process::id() as i32;
+        let mut reader = ProcReader::new(pid);
+        let meta = reader
+            .metadata_bundle(pid)
+            .expect("metadata_bundle should succeed for the current process");
+
+        // For the running test binary tgid == pid == tid.
+        assert_eq!(meta.pid, pid);
+        assert_eq!(meta.tid, pid);
+
+        // UID should match the filesystem metadata of our own /proc entry.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let fs_uid = std::fs::metadata(format!("/proc/{}", pid))
+                .expect("own /proc entry must exist")
+                .uid();
+            assert_eq!(meta.uid, fs_uid);
+        }
+
+        // cmdline must parse to a non-empty display string.
+        assert!(!meta.cmdline.is_empty());
+        // priority string must be resolvable for our own process.
+        assert!(!meta.priority_str.is_empty());
+    }
+
+    #[test]
+    fn test_metadata_bundle_matches_own_status() {
+        // Cross-check the parsed pid/tgid against /proc/self/status.
+        let pid = std::process::id() as i32;
+        let mut reader = ProcReader::new(pid);
+        let meta = reader
+            .metadata_bundle(pid)
+            .expect("metadata_bundle should succeed");
+
+        let status = ProcReader::new(pid)
+            .status()
+            .expect("status should parse for the current process");
+        assert_eq!(meta.tid, status.pid);
+        assert_eq!(meta.pid, status.tgid);
+    }
+
+    #[test]
+    fn test_parse_status_rejects_malformed() {
+        // Missing required fields must yield None.
+        assert!(ProcStatus::parse("Name:\tfoo\n").is_none());
+        assert!(ProcStatus::parse("Tgid:\t1\nPid:\t1\n").is_none());
+        assert!(ProcStatus::parse("").is_none());
+    }
 }
