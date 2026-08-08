@@ -15,18 +15,42 @@ pub struct TaskStats {
 
 // Global flag to detect if CONFIG_TASK_DELAY_ACCT is enabled
 static HAS_DELAY_ACCT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// Whether the sysctl was read authoritatively (false means we fall back to heuristic)
+static DELAY_ACCT_DETECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 impl TaskStats {
     pub fn has_delay_acct() -> bool {
         HAS_DELAY_ACCT.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Detect delay accounting deterministically from `/proc/sys/kernel/task_delayacct`.
+    ///
+    /// Returns `true` when the sysctl was read successfully and the flag is now
+    /// authoritative; returns `false` when the sysctl is unavailable (e.g. on
+    /// kernels without CONFIG_TASK_DELAY_ACCT), in which case `from_kernel_stats`
+    /// keeps using the legacy heuristic as a fallback.
+    pub fn detect_delay_acct() -> bool {
+        match std::fs::read_to_string("/proc/sys/kernel/task_delayacct") {
+            Ok(value) => {
+                let enabled = value.trim() == "1";
+                HAS_DELAY_ACCT.store(enabled, std::sync::atomic::Ordering::Relaxed);
+                DELAY_ACCT_DETECTED.store(true, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     pub fn from_kernel_stats(stats: &KernelTaskStats) -> Self {
         let blkio_delay = stats.delays.blkio.delay_total.as_nanos() as u64;
         let swapin_delay = stats.delays.swapin.delay_total.as_nanos() as u64;
 
-        // Heuristic to detect if CONFIG_TASK_DELAY_ACCT is enabled
-        if !HAS_DELAY_ACCT.load(std::sync::atomic::Ordering::Relaxed) && blkio_delay != 0 {
+        // Fallback heuristic: only applies when the sysctl could not be read
+        // authoritatively (DELAY_ACCT_DETECTED == false).
+        if !DELAY_ACCT_DETECTED.load(std::sync::atomic::Ordering::Relaxed)
+            && !HAS_DELAY_ACCT.load(std::sync::atomic::Ordering::Relaxed)
+            && blkio_delay != 0
+        {
             HAS_DELAY_ACCT.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 

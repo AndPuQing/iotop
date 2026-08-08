@@ -77,6 +77,9 @@ async fn main() -> Result<()> {
     // Resolve usernames to UIDs
     let uids = resolve_users(&args.user)?;
 
+    // Detect delay accounting deterministically from the task_delayacct sysctl
+    TaskStats::detect_delay_acct();
+
     // Connect to taskstats
     let taskstats_conn = TaskStatsConnection::new()?;
     let mut process_list = ProcessList::new(taskstats_conn)
