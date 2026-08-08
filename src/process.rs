@@ -9,7 +9,7 @@ use tokio::task;
 use tokio::time::{interval, Duration};
 use tokio_util::sync::CancellationToken;
 
-use crate::proc_reader::ProcReader;
+use crate::proc_reader::{ProcReader, META_REFRESH_INTERVAL};
 use crate::taskstats::{TaskStats, TaskStatsConnection};
 
 /// Information about a single thread
@@ -57,7 +57,9 @@ pub struct ProcessInfo {
     pub stats_accum: TaskStats,
     #[allow(dead_code)]
     pub stats_accum_timestamp: Instant,
-    metadata_initialized: bool, // Track if we've loaded metadata once
+    metadata_initialized: bool, // Static metadata (UID, user) loaded once
+    metadata_reader: Option<ProcReader>, // Persistent cache reused across refreshes
+    last_metadata_refresh: Option<Instant>, // Last time dynamic fields were refreshed
 }
 
 impl ProcessInfo {
@@ -74,6 +76,8 @@ impl ProcessInfo {
             stats_accum: TaskStats::default(),
             stats_accum_timestamp: Instant::now(),
             metadata_initialized: false,
+            metadata_reader: None,
+            last_metadata_refresh: None,
         }
     }
 
@@ -307,26 +311,49 @@ impl ProcessList {
     }
 
     fn update_process_metadata(process: &mut ProcessInfo, pid_for_status: i32) {
-        // Only update metadata once when process is first seen
-        if process.metadata_initialized {
+        let now = Instant::now();
+
+        // Static metadata (UID, user) is loaded once; dynamic metadata (cmdline,
+        // prio) is re-read every META_REFRESH_INTERVAL so that `exec` (COMMAND)
+        // and `renice` (PRIO) changes are picked up.
+        let refresh_due = process.last_metadata_refresh.is_none_or(|t| {
+            now.duration_since(t) >= META_REFRESH_INTERVAL
+        });
+
+        if process.metadata_initialized && !refresh_due {
             return;
         }
 
-        // Use ProcReader with local cache - cache only benefits within this single call
-        // (multiple threads reading same parent /proc files)
-        let mut reader = ProcReader::new(pid_for_status);
-        if let Ok(metadata) = reader.metadata_bundle(process.pid) {
-            process.pid = metadata.pid;
-            process.tid = metadata.tid;
-            process.uid = Some(metadata.uid);
-            process.cmdline = Some(metadata.cmdline);
-            process.prio = Some(metadata.priority_str);
+        // Reuse the persistent reader + cache across refresh cycles so static
+        // /proc reads (e.g. status) are not repeated on every refresh.
+        let reader = process
+            .metadata_reader
+            .get_or_insert_with(|| ProcReader::new(pid_for_status));
 
-            // Compute and cache user string from UID
-            process.user = Some(process.compute_user());
+        if !process.metadata_initialized {
+            // Initial load: static + dynamic metadata.
+            if let Ok(metadata) = reader.metadata_bundle(process.pid) {
+                process.pid = metadata.pid;
+                process.tid = metadata.tid;
+                process.uid = Some(metadata.uid);
+                process.cmdline = Some(metadata.cmdline);
+                process.prio = Some(metadata.priority_str);
 
-            process.metadata_initialized = true;
+                // Compute and cache user string from UID
+                process.user = Some(process.compute_user());
+
+                process.metadata_initialized = true;
+            }
+        } else {
+            // Periodic refresh: only dynamic fields (cmdline, prio) change.
+            // Static fields (UID, user, pid/tgid) are preserved.
+            if let Ok((cmdline, prio)) = reader.refresh_dynamic(process.pid) {
+                process.cmdline = Some(cmdline);
+                process.prio = Some(prio);
+            }
         }
+
+        process.last_metadata_refresh = Some(now);
     }
 
     fn collect_thread_stats(
