@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- New `-c/--command <regex>` option to filter processes by a regex against the command line (repeatable; works in batch and interactive modes)
+
 ## [0.2.5] - 2026-08-08
 
 ### Changed

@@ -59,6 +59,11 @@ Threads of the specified process are also monitored.
 Monitor only processes belonging to the specified user(s). The argument can be either a username
 or a numeric UID. This option can be repeated to monitor multiple users.
 .TP
+.BR \-c ", " \-\-command " \fIREGEX\fR"
+Only show processes whose command line matches the given regular expression. This option can be
+repeated to combine several patterns (a process is shown if it matches any of them). Works in both
+batch and interactive modes. Invalid patterns are rejected at startup.
+.TP
 .BR \-t ", " \-\-time
 Add a timestamp on each line in batch mode (implies \fB\-\-batch\fR). The timestamp format is HH:MM:SS.
 .TP
@@ -182,6 +187,11 @@ Monitor specific process and show only processes (not threads):
 .TP
 Monitor all processes of a specific user:
 .B sudo iotop \-u www-data
+.TP
+Filter by command-line regex:
+.B sudo iotop \-c bash
+.TP
+.B sudo iotop \-c '^sshd' \-c 'nginx.*worker'
 .TP
 Batch mode with timestamps and quiet output:
 .B sudo iotop \-tq \-n 10 > iotop.log

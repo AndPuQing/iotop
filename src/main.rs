@@ -9,7 +9,8 @@ use argh::FromArgs;
 use crossterm::event::MouseEventKind;
 use crossterm::event::{KeyCode, KeyModifiers};
 use nix::unistd::User;
-use process::{ProcessList, ProcessSnapshot};
+use process::{ProcessInfo, ProcessList, ProcessSnapshot};
+use regex::Regex;
 use taskstats::{TaskStats, TaskStatsConnection};
 use tokio_util::sync::CancellationToken;
 use ui::{Event, SortColumn, Tui, UIState};
@@ -54,6 +55,10 @@ struct Args {
     #[argh(option, short = 'u')]
     user: Vec<String>,
 
+    /// regex to match against the command line (can be repeated)
+    #[argh(option, short = 'c')]
+    command: Vec<String>,
+
     /// add timestamp on each line (implies --batch)
     #[argh(switch, short = 't')]
     time: bool,
@@ -85,6 +90,9 @@ async fn main() -> Result<()> {
     // Resolve usernames to UIDs
     let uids = resolve_users(&args.user)?;
 
+    // Compile command-line regex filters (invalid patterns abort early)
+    let command_regexes = compile_command_regexes(&args.command)?;
+
     // Connect to taskstats
     let taskstats_conn = TaskStatsConnection::new()?;
     warn_if_taskstats_unreadable(&taskstats_conn);
@@ -93,9 +101,9 @@ async fn main() -> Result<()> {
         .with_uids(uids.clone());
 
     if args.batch || args.time || args.quiet || args.json || args.csv {
-        run_batch_mode(&mut process_list, &args)?;
+        run_batch_mode(&mut process_list, &args, &command_regexes)?;
     } else {
-        run_interactive_mode(&mut process_list, &args).await?;
+        run_interactive_mode(&mut process_list, &args, &command_regexes).await?;
     }
 
     Ok(())
@@ -167,7 +175,32 @@ fn resolve_users(users: &[String]) -> Result<Vec<u32>> {
     Ok(uids)
 }
 
-async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+/// Compile the `-c/--command` regex filters. Returns an error describing the
+/// offending pattern so invalid regexes fail fast at startup.
+fn compile_command_regexes(patterns: &[String]) -> Result<Vec<Regex>> {
+    patterns
+        .iter()
+        .map(|p| {
+            Regex::new(p).map_err(|e| anyhow::anyhow!("invalid command regex {:?}: {}", p, e))
+        })
+        .collect()
+}
+
+/// Filter a process list in place so only processes whose command line matches
+/// at least one of the given regexes remain. When `regexes` is empty no
+/// filtering is applied. Used by batch and interactive modes alike.
+fn filter_by_command(processes: &mut Vec<&ProcessInfo>, regexes: &[Regex]) {
+    if regexes.is_empty() {
+        return;
+    }
+    processes.retain(|p| regexes.iter().any(|re| re.is_match(p.get_cmdline())));
+}
+
+async fn run_interactive_mode(
+    process_list: &mut ProcessList,
+    args: &Args,
+    command_regexes: &[Regex],
+) -> Result<()> {
     let mut tui = Tui::new()?;
     tui.enter()?;
 
@@ -212,7 +245,13 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
 
                     }
                     Event::DataUpdate(snapshot) => {
-                        render_snapshot(&mut tui, &snapshot, &mut state, has_delay_acct)?;
+                        render_snapshot(
+                            &mut tui,
+                            &snapshot,
+                            &mut state,
+                            has_delay_acct,
+                            command_regexes,
+                        )?;
 
                         // Check iteration limit
                         if let Some(max_iter) = args.iterations {
@@ -224,7 +263,13 @@ async fn run_interactive_mode(process_list: &mut ProcessList, args: &Args) -> Re
                     }
                     Event::Render => {
                         if let Some(ref snapshot) = current_snapshot {
-                            render_snapshot(&mut tui, snapshot, &mut state, has_delay_acct)?;
+                            render_snapshot(
+                                &mut tui,
+                                snapshot,
+                                &mut state,
+                                has_delay_acct,
+                                command_regexes,
+                            )?;
                         }
                     }
                     Event::Key(key) => match key.code {
@@ -418,12 +463,14 @@ fn render_snapshot(
     snapshot: &ProcessSnapshot,
     state: &mut UIState,
     has_delay_acct: bool,
+    command_regexes: &[Regex],
 ) -> Result<()> {
     let mut processes: Vec<&process::ProcessInfo> = snapshot.processes.values().collect();
 
     if state.only_active {
         processes.retain(|p| p.did_some_io(state.accumulated));
     }
+    filter_by_command(&mut processes, command_regexes);
 
     sort_processes(&mut processes, state);
 
@@ -515,14 +562,18 @@ fn sort_processes(processes: &mut Vec<&process::ProcessInfo>, state: &UIState) {
 /// Batch mode outputs process I/O statistics to stdout in a parseable format.
 /// This function gracefully handles broken pipe errors (e.g., when output is
 /// piped to `head` or similar utilities) by returning Ok(()) when write errors occur.
-fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+fn run_batch_mode(
+    process_list: &mut ProcessList,
+    args: &Args,
+    command_regexes: &[Regex],
+) -> Result<()> {
     // Machine-readable output modes take precedence over the plain-text batch
     // output. They share the same refresh loop and iteration/delay semantics.
     if args.json {
-        return run_json_mode(process_list, args);
+        return run_json_mode(process_list, args, command_regexes);
     }
     if args.csv {
-        return run_csv_mode(process_list, args);
+        return run_csv_mode(process_list, args, command_regexes);
     }
 
     use std::io::{self, Write};
@@ -607,6 +658,7 @@ fn run_batch_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
         if args.only {
             processes.retain(|p| p.did_some_io(args.accumulated));
         }
+        filter_by_command(&mut processes, command_regexes);
 
         processes.sort_by(|a, b| {
             let stats_a = if args.accumulated {
@@ -786,7 +838,11 @@ fn collect_row(process: &process::ProcessInfo, accumulated: bool, duration: f64)
 
 /// Batch mode with `--json`: emit one JSON object per iteration, containing the
 /// iteration timestamp, total/actual disk I/O, and the process list.
-fn run_json_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+fn run_json_mode(
+    process_list: &mut ProcessList,
+    args: &Args,
+    command_regexes: &[Regex],
+) -> Result<()> {
     use std::io::{self, Write};
     use std::thread;
     use std::time::Duration;
@@ -806,6 +862,7 @@ fn run_json_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
         if args.only {
             processes.retain(|p| p.did_some_io(args.accumulated));
         }
+        filter_by_command(&mut processes, command_regexes);
         sort_processes_by_io(&mut processes, args);
 
         let rows: Vec<serde_json::Value> = processes
@@ -864,7 +921,11 @@ fn csv_field(value: &str) -> String {
 /// Batch mode with `--csv`: emit one CSV row per process per iteration. A header
 /// row is printed before the first iteration (unless `--quiet`). With `--time` a
 /// leading time column is added. Compatible with `-t`/`-q`.
-fn run_csv_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
+fn run_csv_mode(
+    process_list: &mut ProcessList,
+    args: &Args,
+    command_regexes: &[Regex],
+) -> Result<()> {
     use std::io::{self, Write};
     use std::thread;
     use std::time::Duration;
@@ -887,6 +948,7 @@ fn run_csv_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
         if args.only {
             processes.retain(|p| p.did_some_io(args.accumulated));
         }
+        filter_by_command(&mut processes, command_regexes);
         sort_processes_by_io(&mut processes, args);
 
         if !args.quiet && !header_printed {
@@ -951,4 +1013,83 @@ fn run_csv_mode(process_list: &mut ProcessList, args: &Args) -> Result<()> {
         thread::sleep(Duration::from_secs_f64(args.delay));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn process_with_cmdline(pid: i32, cmdline: &str) -> ProcessInfo {
+        let mut p = ProcessInfo::new(pid);
+        p.cmdline = Some(cmdline.to_string());
+        p
+    }
+
+    fn refs(owned: &mut [ProcessInfo]) -> Vec<&ProcessInfo> {
+        owned.iter().collect()
+    }
+
+    #[test]
+    fn test_compile_command_regexes_valid() {
+        let regexes = compile_command_regexes(&["bash".to_string(), "ssh.*".to_string()]).unwrap();
+        assert_eq!(regexes.len(), 2);
+    }
+
+    #[test]
+    fn test_compile_command_regexes_invalid() {
+        assert!(compile_command_regexes(&["[".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_filter_by_command_empty_noop() {
+        let mut owned = vec![
+            process_with_cmdline(1, "bash"),
+            process_with_cmdline(2, "sshd -D"),
+        ];
+        let mut processes = refs(&mut owned);
+        filter_by_command(&mut processes, &[]);
+        assert_eq!(processes.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_by_command_matches_substring() {
+        let mut owned = vec![
+            process_with_cmdline(1, "/usr/bin/bash --login"),
+            process_with_cmdline(2, "sshd: root@pts/0"),
+            process_with_cmdline(3, "nginx: worker"),
+        ];
+        let regexes = compile_command_regexes(&["bash".to_string()]).unwrap();
+        let mut processes = refs(&mut owned);
+        filter_by_command(&mut processes, &regexes);
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].pid, 1);
+    }
+
+    #[test]
+    fn test_filter_by_command_multiple_regexes_any() {
+        let mut owned = vec![
+            process_with_cmdline(1, "bash"),
+            process_with_cmdline(2, "nginx"),
+            process_with_cmdline(3, "sleep 10"),
+        ];
+        let regexes =
+            compile_command_regexes(&["bash".to_string(), "nginx".to_string()]).unwrap();
+        let mut processes = refs(&mut owned);
+        filter_by_command(&mut processes, &regexes);
+        let remaining: Vec<i32> = processes.iter().map(|p| p.pid).collect();
+        assert_eq!(remaining, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_filter_by_command_regex_anchoring() {
+        let mut owned = vec![
+            process_with_cmdline(1, "bash"),
+            process_with_cmdline(2, "notbash"),
+        ];
+        let regexes = compile_command_regexes(&["^bash$".to_string()]).unwrap();
+        let mut processes = refs(&mut owned);
+        filter_by_command(&mut processes, &regexes);
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].pid, 1);
+    }
 }

@@ -110,6 +110,12 @@ Monitor user's processes:
 sudo iotop -u www-data
 ```
 
+Filter by command-line regex:
+```bash
+sudo iotop -c bash
+sudo iotop -c '^sshd' -c 'nginx.*worker'
+```
+
 Batch mode with timestamps:
 ```bash
 sudo iotop -t -b -n 10 > iotop.log
@@ -140,6 +146,7 @@ sudo iotop -b --csv -t -q -n 5
 | `-b` | `--batch` | Batch mode (non-interactive) |
 | `-p` | `--pid` | Monitor specific processes/threads (can be repeated) |
 | `-u` | `--user` | Monitor processes by username or UID (can be repeated) |
+| `-c` | `--command` | Only show processes whose command line matches the regex (can be repeated) |
 | `-t` | `--time` | Add timestamp on each line (implies `--batch`) |
 | `-q` | `--quiet` | Suppress column names and headers (implies `--batch`) |
 | `-k` | `--kilobytes` | Use kilobytes instead of human-friendly units |
