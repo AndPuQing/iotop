@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-08-08
+
+### Changed
+- Upgrade ratatui to 0.30 and nix to 0.31
+- Upgrade vendored linux-taskstats dependencies: bindgen to 0.72 and thiserror to v2
+- Fix deprecated `CargoCallbacks` usage in linux-taskstats build script
+- Upgrade GitHub Actions: actions/checkout to v7, softprops/action-gh-release to v3
+
 ## [Unreleased]
 
 ## [0.1.8] - 2025-10-11
@@ -91,7 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - I/O bandwidth and accumulated I/O tracking
 - Command-line options for filtering and customization
 
-[Unreleased]: https://github.com/AndPuQing/iotop/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/AndPuQing/iotop/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/AndPuQing/iotop/compare/v0.2.4...v0.2.5
 [0.1.8]: https://github.com/AndPuQing/iotop/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/AndPuQing/iotop/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/AndPuQing/iotop/compare/v0.1.5...v0.1.6

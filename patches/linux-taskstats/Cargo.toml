@@ -65,10 +65,10 @@ version = "0.10.0"
 optional = true
 
 [dependencies.thiserror]
-version = "1.0.38"
+version = "2"
 
 [build-dependencies.bindgen]
-version = "0.65.1"
+version = "0.72"
 
 [features]
 default = ["executable"]
